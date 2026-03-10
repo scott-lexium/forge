@@ -1,6 +1,6 @@
 # forge
 
-> Automated, interactive VPS setup & security hardening CLI for Ubuntu 22.04 LTS.  
+> Automated, interactive VPS setup & security hardening CLI for Ubuntu 20.04 / 22.04 / 24.04 LTS.  
 > Covers everything from first login to production-ready server in one command.
 
 ---
@@ -35,8 +35,9 @@ sudo forge [command]
 |---|---|
 | `sudo forge` | Run the full interactive wizard *(default)* |
 | `sudo forge run` | Same as above |
-| `sudo forge phase <1-13>` | Run a single phase only |
+| `sudo forge phase <1-14>` | Run a single phase only |
 | `sudo forge status` | Show live hardening status of the server |
+| `sudo forge reset` | Reset server configuration (revert SSH, UFW, users) |
 | `sudo forge logs` | Browse past setup logs |
 | `sudo forge update` | Self-update to the latest version |
 | `sudo forge uninstall` | Remove forge from the system |
@@ -62,6 +63,7 @@ sudo forge [command]
 | 11 | Monitoring | htop, iotop, nethogs, ncdu, logwatch |
 | 12 | Lynis audit | Full security audit with recommendations |
 | 13 | Backup | Config archive of all hardened files |
+| 14 | Swap file | Automated creation and optimization (2G-4G) |
 
 ---
 
@@ -73,6 +75,9 @@ sudo forge
 
 # Only add fail2ban to an existing server
 sudo forge phase 5
+
+# Reset server configuration back to default
+sudo forge reset
 
 # Check what's hardened right now
 sudo forge status
