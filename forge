@@ -172,9 +172,9 @@ cmd_help() {
     echo -e "    ${D}14${RESET}  Swap file creation"
     echo -e "    ${D}15${RESET}  Zsh + Oh-My-Zsh shell"
     echo -e "    ${D}16${RESET}  Webhook notifications"
+    echo -e "    ${D}17${RESET}  WireGuard VPN Server"
     echo ""
     }
-
     echo -e "  ${W}Examples:${RESET}"
     echo -e "    ${D}sudo forge${RESET}              # interactive wizard"
     echo -e "    ${D}sudo forge run${RESET}          # same as above"
@@ -256,6 +256,7 @@ cmd_status() {
         echo -e "  ${OK} SSH persistent service is in control${RESET}"
     fi
     _check "CapRover container"          "docker ps 2>/dev/null | grep -q caprover"
+    _check "WireGuard VPN active"        "systemctl is-active wg-quick@wg0"
     echo ""
 
     echo -e "  ${W}SSH Config${RESET}"
@@ -438,6 +439,20 @@ cmd_reset() {
         fi
     fi
 
+    # 8. Remove WireGuard
+    if [[ -d "/etc/wireguard" ]]; then
+        if confirm "Remove WireGuard VPN configuration and keys?" "n"; then
+            info "Stopping and removing WireGuard..."
+            systemctl stop wg-quick@wg0 >> "$LOG_FILE" 2>&1 || true
+            systemctl disable wg-quick@wg0 >> "$LOG_FILE" 2>&1 || true
+            rm -rf /etc/wireguard
+            rm -f /etc/sysctl.d/99-wireguard.conf
+            rm -f /root/wireguard-client.conf
+            ufw delete allow 51820/udp >> "$LOG_FILE" 2>&1 || true
+            ok "WireGuard removed"
+        fi
+    fi
+
     echo ""
     ok "Reset complete. Server is back to (mostly) default state."
     echo ""
@@ -496,14 +511,14 @@ phase_menu() {
         echo -e "   ${C}[14]${RESET}  Swap file creation"
         echo -e "   ${C}[15]${RESET}  Zsh + Oh-My-Zsh Shell"
         echo -e "   ${C}[16]${RESET}  Webhook Notifications (Slack/Discord/Telegram)"
+        echo -e "   ${C}[17]${RESET}  WireGuard VPN Server"
         echo ""
         echo -e "  ${D}Enter numbers separated by spaces (e.g. 1 2 3 4 5):${RESET}"
         echo -en "  ${C}?${RESET} ${W}Phases${RESET}: "
         read -r -a PHASES_RUN
         else
-        PHASES_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
+        PHASES_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
         fi
-
     log "Phases selected: ${PHASES_RUN[*]}"
 }
 
@@ -1046,6 +1061,7 @@ cmd_phase() {
         14) phase_swap           ;;
         15) phase_zsh            ;;
         16) phase_notifications  ;;
+        17) phase_wireguard      ;;
     esac
 }
 
@@ -1208,6 +1224,80 @@ phase_notifications() {
     ok "Phase 16 complete"
 }
 
+# ─── PHASE: WireGuard VPN ─────────────────────────────────────────────────────
+phase_wireguard() {
+    banner "Phase 17 · WireGuard VPN"
+    
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y wireguard qrencode iptables
+    
+    local wg_dir="/etc/wireguard"
+    mkdir -p "$wg_dir" && chmod 700 "$wg_dir"
+    
+    info "Generating keys..."
+    local server_priv server_pub client_priv client_pub
+    server_priv=$(wg genkey)
+    server_pub=$(echo "$server_priv" | wg pubkey)
+    client_priv=$(wg genkey)
+    client_pub=$(echo "$client_priv" | wg pubkey)
+    
+    local public_ip
+    public_ip=$(hostname -I | awk '{print $1}')
+    local eth_int
+    eth_int=$(ip route get 8.8.8.8 | grep -Po '(?<=dev )(\S+)')
+
+    info "Configuring server (wg0)..."
+    cat > "${wg_dir}/wg0.conf" <<WGOEOF
+[Interface]
+PrivateKey = ${server_priv}
+Address = 10.0.0.1/24
+ListenPort = 51820
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${eth_int} -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${eth_int} -j MASQUERADE
+
+[Peer]
+PublicKey = ${client_pub}
+AllowedIPs = 10.0.0.2/32
+WGOEOF
+
+    # Enable IP forwarding
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
+    sysctl -p /etc/sysctl.d/99-wireguard.conf >> "$LOG_FILE" 2>&1
+
+    # UFW integration
+    if command -v ufw &>/dev/null; then
+        ufw allow 51820/udp comment "WireGuard" >> "$LOG_FILE" 2>&1
+    fi
+
+    systemctl enable wg-quick@wg0 >> "$LOG_FILE" 2>&1
+    systemctl start wg-quick@wg0 >> "$LOG_FILE" 2>&1
+
+    # Generate client config
+    cat > "/root/wireguard-client.conf" <<WGOEOF
+[Interface]
+PrivateKey = ${client_priv}
+Address = 10.0.0.2/24
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = ${server_pub}
+Endpoint = ${public_ip}:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+WGOEOF
+
+    ok "WireGuard server running on port 51820"
+    echo ""
+    echo -e "  ${G}${BOLD}CLIENT CONFIG GENERATED!${RESET}"
+    echo -e "  ${D}Saved to:${RESET} ${W}/root/wireguard-client.conf${RESET}"
+    echo ""
+    echo -e "  ${W}Scan this with your WireGuard mobile app:${RESET}"
+    echo ""
+    qrencode -t ansiutf8 < "/root/wireguard-client.conf"
+    echo ""
+    
+    ok "Phase 17 complete"
+}
+
 # ─── CMD: full wizard run ─────────────────────────────────────────────────────
 cmd_run() {
     require_root
@@ -1241,6 +1331,7 @@ cmd_run() {
     has_phase 14 && phase_swap
     has_phase 15 && phase_zsh
     has_phase 16 && phase_notifications
+    has_phase 17 && phase_wireguard
 
     print_summary
     
