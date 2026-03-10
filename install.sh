@@ -10,7 +10,9 @@ set -euo pipefail
 
 TOOL_NAME="forge"
 INSTALL_PATH="/usr/local/bin/${TOOL_NAME}"
-GITHUB_RAW="https://raw.githubusercontent.com/scott-lexium/forge/main"
+CHANNEL="stable"
+[[ "${1:-}" == "--canary" ]] && CHANNEL="canary"
+GITHUB_RAW="https://raw.githubusercontent.com/scott-lexium/forge/${CHANNEL}"
 LOG_DIR="/var/log/forge"
 CONFIG_DIR="/etc/forge"
 

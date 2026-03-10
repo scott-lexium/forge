@@ -9,10 +9,12 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ─── Meta ─────────────────────────────────────────────────────────────────────
-VERSION="1.1.0"  # x-release-please-version
+VERSION="1.0.0"  # x-release-please-version
+CHANNEL="stable"
 TOOL_NAME="forge"
 INSTALL_PATH="/usr/local/bin/${TOOL_NAME}"
-GITHUB_RAW="https://raw.githubusercontent.com/scott-lexium/forge/main"
+GITHUB_RAW="https://raw.githubusercontent.com/scott-lexium/forge/${CHANNEL}"
+
 CONFIG_DIR="/etc/forge"
 LOG_DIR="/var/log/forge"
 
@@ -225,6 +227,7 @@ cmd_status() {
     }
 
     echo -e "  ${W}System${RESET}"
+    _val "Version"       "echo v${VERSION} (${CHANNEL})"
     _val "Hostname"      "hostname"
     _val "OS"            "lsb_release -ds 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"'"
     _val "Uptime"        "uptime -p"
@@ -287,30 +290,39 @@ cmd_status() {
 cmd_update() {
     require_root update
     banner "Self-Update"
+    
+    local target_channel="${CHANNEL}"
+    if [[ "${1:-}" == "--canary" ]]; then
+        target_channel="canary"
+    elif [[ "${1:-}" == "--stable" ]]; then
+        target_channel="stable"
+    fi
 
-    info "Fetching latest version from GitHub..."
+    local update_url="https://raw.githubusercontent.com/scott-lexium/forge/${target_channel}/forge"
+    info "Fetching from channel: ${target_channel}..."
 
     local tmp
     tmp=$(mktemp)
 
-    if curl -fsSL "${GITHUB_RAW}/forge" -o "$tmp" 2>>"$LOG_FILE"; then
+    if curl -fsSL "$update_url" -o "$tmp" 2>>"$LOG_FILE"; then
         local remote_version
+        local remote_channel
         remote_version=$(grep '^VERSION=' "$tmp" | head -1 | cut -d'"' -f2)
+        remote_channel=$(grep '^CHANNEL=' "$tmp" | head -1 | cut -d'"' -f2)
 
-        if [[ "$remote_version" == "$VERSION" ]]; then
-            ok "Already on the latest version (${VERSION})"
+        if [[ "$remote_version" == "$VERSION" && "$remote_channel" == "$CHANNEL" ]]; then
+            ok "Already on the latest version (${VERSION}) of ${CHANNEL} channel."
             rm -f "$tmp"
             return
         fi
 
-        info "Updating ${VERSION} → ${remote_version}..."
+        info "Updating ${CHANNEL}/${VERSION} → ${remote_channel}/${remote_version}..."
         chmod +x "$tmp"
         mv "$tmp" "$INSTALL_PATH"
-        ok "Updated to v${remote_version}"
-        note "Run: forge version — to confirm"
+        ok "Updated successfully."
+        note "Run: forge status — to confirm"
     else
-        error "Could not reach GitHub. Check your internet connection."
-        note "Manual update: curl -fsSL ${GITHUB_RAW}/forge | sudo tee ${INSTALL_PATH} && sudo chmod +x ${INSTALL_PATH}"
+        error "Could not reach GitHub or channel '${target_channel}' not found."
         rm -f "$tmp"
         return 1
     fi
