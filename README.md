@@ -39,7 +39,7 @@ sudo forge [command]
 |---|---|
 | `sudo forge` | Run the full interactive wizard *(default)* |
 | `sudo forge run` | Same as above |
-| `sudo forge phase <1-15>` | Run a single phase only |
+| `sudo forge phase <1-16>` | Run a single phase only |
 | `sudo forge status` | Show live hardening status of the server |
 | `sudo forge shell [user]` | Manage user shells (Switch Bash/Zsh) |
 | `sudo forge reset` | Reset server configuration (revert SSH, UFW, users) |
@@ -72,6 +72,7 @@ sudo forge [command]
 | 13 | Backup | Config archive of all hardened files |
 | 14 | Swap file | Automated creation and optimization (2G-4G) |
 | 15 | Zsh Shell | Zsh + Oh-My-Zsh + Plugins (autosuggestions, syntax highlighting) |
+| 16 | Notifications | Webhook alerts for Slack, Discord, and Telegram |
 
 ---
 

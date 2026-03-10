@@ -36,6 +36,8 @@ SSH_PUB_KEY=""
 SERVER_HOSTNAME="vps-server"
 SERVER_TIMEZONE="UTC"
 DOMAIN=""
+WEBHOOK_URL=""
+WEBHOOK_TYPE="slack"
 OPEN_SWARM=false
 INSTALL_DOCKER=false
 INSTALL_CAPROVER=false
@@ -169,7 +171,9 @@ cmd_help() {
     echo -e "    ${D}13${RESET}  Config backup"
     echo -e "    ${D}14${RESET}  Swap file creation"
     echo -e "    ${D}15${RESET}  Zsh + Oh-My-Zsh shell"
+    echo -e "    ${D}16${RESET}  Webhook notifications"
     echo ""
+    }
 
     echo -e "  ${W}Examples:${RESET}"
     echo -e "    ${D}sudo forge${RESET}              # interactive wizard"
@@ -491,13 +495,15 @@ phase_menu() {
         echo -e "   ${C}[13]${RESET}  Config backup"
         echo -e "   ${C}[14]${RESET}  Swap file creation"
         echo -e "   ${C}[15]${RESET}  Zsh + Oh-My-Zsh Shell"
+        echo -e "   ${C}[16]${RESET}  Webhook Notifications (Slack/Discord/Telegram)"
         echo ""
         echo -e "  ${D}Enter numbers separated by spaces (e.g. 1 2 3 4 5):${RESET}"
         echo -en "  ${C}?${RESET} ${W}Phases${RESET}: "
         read -r -a PHASES_RUN
         else
-        PHASES_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+        PHASES_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16)
         fi
+
     log "Phases selected: ${PHASES_RUN[*]}"
 }
 
@@ -521,6 +527,24 @@ gather_config() {
 
     if has_phase 3; then
         read_ssh_pubkey
+    fi
+
+    if has_phase 16; then
+        ask WEBHOOK_URL "Webhook URL (Slack/Discord/Telegram)" ""
+        if [[ -n "$WEBHOOK_URL" ]]; then
+            echo -e "  ${C}?${RESET} ${W}Select Webhook Type${RESET}:"
+            echo -e "    ${C}[s]${RESET} Slack"
+            echo -e "    ${C}[d]${RESET} Discord"
+            echo -e "    ${C}[t]${RESET} Telegram"
+            echo -en "  ${C}?${RESET} ${W}Your choice${RESET} [${G}s${RESET}/d/t]: "
+            read -r type
+            case "${type,,}" in
+                d*) WEBHOOK_TYPE="discord" ;;
+                t*) WEBHOOK_TYPE="telegram" ;;
+                *)  WEBHOOK_TYPE="slack" ;;
+            esac
+        fi
+        echo ""
     fi
 
     if has_phase 1; then
@@ -1021,6 +1045,7 @@ cmd_phase() {
         13) phase_backup         ;;
         14) phase_swap           ;;
         15) phase_zsh            ;;
+        16) phase_notifications  ;;
     esac
 }
 
@@ -1146,6 +1171,43 @@ cmd_shell() {
     esac
 }
 
+# ─── PHASE: Webhook Notifications ──────────────────────────────────────────
+send_notification() {
+    local message="$1"
+    [[ -z "$WEBHOOK_URL" ]] && return 0
+    
+    local payload=""
+    case "$WEBHOOK_TYPE" in
+        slack)   payload="{\"text\": \"${message}\"}" ;;
+        discord) payload="{\"content\": \"${message}\"}" ;;
+        telegram) 
+            # Telegram format: URL should be https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>
+            curl -s -X POST "$WEBHOOK_URL" -d "text=${message}" >> "$LOG_FILE" 2>&1
+            return 0
+            ;;
+    esac
+    
+    curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK_URL" >> "$LOG_FILE" 2>&1
+}
+
+phase_notifications() {
+    banner "Phase 16 · Webhook Notifications"
+    
+    if [[ -z "$WEBHOOK_URL" ]]; then
+        warn "Webhook URL not configured — skipping"
+        return 0
+    fi
+
+    # Save to config if not present
+    mkdir -p "$CONFIG_DIR"
+    echo "WEBHOOK_URL=\"$WEBHOOK_URL\"" > "${CONFIG_DIR}/notifications.conf"
+    echo "WEBHOOK_TYPE=\"$WEBHOOK_TYPE\"" >> "${CONFIG_DIR}/notifications.conf"
+    
+    send_notification "🔔 *Forge v${VERSION}*: Notifications enabled for *$(hostname)*"
+    ok "Notifications enabled and test sent (${WEBHOOK_TYPE})"
+    ok "Phase 16 complete"
+}
+
 # ─── CMD: full wizard run ─────────────────────────────────────────────────────
 cmd_run() {
     require_root
@@ -1157,6 +1219,11 @@ cmd_run() {
 
     echo ""
     echo -e "  ${G}${BOLD}Starting...${RESET}\n"
+
+    # Send start notification if configured
+    if [[ -n "$WEBHOOK_URL" ]]; then
+        send_notification "🚀 *Forge*: Starting setup on *$(hostname)*"
+    fi
 
     has_phase 1  && phase_system_update
     has_phase 2  && phase_create_user
@@ -1173,8 +1240,13 @@ cmd_run() {
     has_phase 13 && phase_backup
     has_phase 14 && phase_swap
     has_phase 15 && phase_zsh
+    has_phase 16 && phase_notifications
 
     print_summary
+    
+    if [[ -n "$WEBHOOK_URL" ]]; then
+        send_notification "✅ *Forge*: Setup completed successfully on *$(hostname)*"
+    fi
     log "forge completed"
 }
 
