@@ -1,0 +1,1115 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  Forge  —  Automated Server Setup & Security Hardening
+#  Version  : 1.0.0
+#  Install  : curl -fsSL https://raw.githubusercontent.com/scott-lexium/forge/main/install.sh | sudo bash
+#  Usage    : sudo forge [command]
+# =============================================================================
+set -euo pipefail
+IFS=$'\n\t'
+
+# ─── Meta ─────────────────────────────────────────────────────────────────────
+VERSION="1.0.0"  # x-release-please-version
+TOOL_NAME="forge"
+INSTALL_PATH="/usr/local/bin/${TOOL_NAME}"
+GITHUB_RAW="https://raw.githubusercontent.com/scott-lexium/forge/main"
+CONFIG_DIR="/etc/forge"
+LOG_DIR="/var/log/forge"
+
+# ─── Colours ──────────────────────────────────────────────────────────────────
+R='\033[0;31m'  G='\033[0;32m'  Y='\033[1;33m'  B='\033[0;34m'
+C='\033[0;36m'  M='\033[0;35m'  W='\033[1;37m'  D='\033[2;37m'
+BOLD='\033[1m'  RESET='\033[0m'
+OK="${G}✔${RESET}"  SKIP="${Y}⊘${RESET}"  ERR="${R}✘${RESET}"  ARROW="${C}❯${RESET}"
+
+# ─── Ensure log dir exists ────────────────────────────────────────────────────
+mkdir -p "$LOG_DIR" && chmod 750 "$LOG_DIR"
+LOG_FILE="${LOG_DIR}/setup-$(date +%Y%m%d-%H%M%S).log"
+touch "$LOG_FILE" && chmod 640 "$LOG_FILE"
+
+# ─── Runtime state ────────────────────────────────────────────────────────────
+ADMIN_USER=""
+SSH_PORT="2222"
+SSH_PUB_KEY=""
+SERVER_HOSTNAME="vps-server"
+SERVER_TIMEZONE="UTC"
+DOMAIN=""
+OPEN_SWARM=false
+INSTALL_DOCKER=false
+INSTALL_CAPROVER=false
+declare -a EXTRA_PORTS=()
+declare -a PHASES_RUN=()
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+log()     { echo "$(date '+%H:%M:%S') $*" >> "$LOG_FILE" 2>&1; }
+banner()  {
+    echo ""
+    echo -e "${C}┌─────────────────────────────────────────────────────────────┐${RESET}"
+    echo -e "${C}│${RESET}  ${BOLD}${W}$1${RESET}$(printf '%*s' $((58 - ${#1})) '')${C}│${RESET}"
+    echo -e "${C}└─────────────────────────────────────────────────────────────┘${RESET}"
+    echo ""
+}
+section() { echo -e "\n${M}━━━  $1  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"; }
+info()    { echo -e "  ${ARROW} ${W}$1${RESET}"; log "INFO: $1"; }
+ok()      { echo -e "  ${OK} $1"; log "OK: $1"; }
+warn()    { echo -e "  ${Y}⚠${RESET}  ${Y}$1${RESET}"; log "WARN: $1"; }
+error()   { echo -e "  ${ERR} ${R}$1${RESET}"; log "ERROR: $1"; }
+note()    { echo -e "  ${D}   $1${RESET}"; }
+skip()    { echo -e "  ${SKIP} ${D}Skipped: $1${RESET}"; log "SKIP: $1"; }
+
+run() {
+    log "RUN: $*"
+    if ! "$@" >> "$LOG_FILE" 2>&1; then
+        error "Command failed: $*"
+        echo -e "  ${D}See $LOG_FILE for details${RESET}"
+        return 1
+    fi
+}
+
+ask() {
+    local var=$1 prompt=$2 default=${3:-""}
+    local hint=""
+    [[ -n "$default" ]] && hint=" ${D}[${default}]${RESET}"
+    echo -en "  ${C}?${RESET} ${W}${prompt}${RESET}${hint}: "
+    read -r input
+    [[ -z "$input" && -n "$default" ]] && input="$default"
+    eval "$var=\"$input\""
+}
+
+confirm() {
+    local prompt=$1 default=${2:-"y"}
+    local hint
+    [[ "$default" == "y" ]] && hint="${G}Y${RESET}/${D}n${RESET}" || hint="${D}y${RESET}/${G}N${RESET}"
+    echo -en "  ${C}?${RESET} ${W}${prompt}${RESET} [${hint}]: "
+    read -r ans
+    [[ -z "$ans" ]] && ans="$default"
+    [[ "$ans" =~ ^[Yy] ]]
+}
+
+pause() {
+    echo ""
+    echo -en "  ${D}Press ${RESET}${W}Enter${RESET}${D} to continue...${RESET}"
+    read -r
+}
+
+read_ssh_pubkey() {
+    while true; do
+        echo -e "  ${C}?${RESET} ${W}Paste your SSH public key${RESET} ${D}(cat ~/.ssh/id_ed25519.pub on local machine)${RESET}"
+        echo -en "  ${D}> ${RESET}"
+        read -r SSH_PUB_KEY
+        echo ""
+        if [[ -z "$SSH_PUB_KEY" ]]; then
+            warn "No key entered."
+            note "To generate one on your local machine: ssh-keygen -t ed25519"
+        elif [[ ! "$SSH_PUB_KEY" =~ ^(ssh-|ecdsa-|sk-) ]]; then
+            warn "That doesn't look like a valid SSH public key."
+            note "Expected format: ssh-ed25519 AAAA...  (or ssh-rsa, ecdsa-sha2-*, etc.)"
+        else
+            return 0
+        fi
+        echo ""
+        echo -en "  ${D}Try again? [${RESET}${G}Y${RESET}${D}/n]: ${RESET}"
+        read -r _retry
+        [[ "$_retry" =~ ^[Nn] ]] && { error "SSH public key is required for Phase 3. Aborting."; exit 1; }
+        echo ""
+    done
+}
+
+require_root() {
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "\n${R}  ✘ This command must be run as root.${RESET}"
+        echo -e "  Run: ${W}sudo ${TOOL_NAME} $*${RESET}\n"
+        exit 1
+    fi
+}
+
+has_phase() {
+    local p
+    for p in "${PHASES_RUN[@]}"; do
+        [[ "$p" == "$1" ]] && return 0
+    done
+    return 1
+}
+
+# ─── HELP ─────────────────────────────────────────────────────────────────────
+cmd_help() {
+    echo ""
+    echo -e "${C}${BOLD}  VPS Wizard  ${RESET}${D}v${VERSION}${RESET}"
+    echo ""
+    echo -e "  ${W}Usage:${RESET}"
+    echo -e "    ${C}sudo forge${RESET} ${D}[command]${RESET}"
+    echo ""
+    echo -e "  ${W}Commands:${RESET}"
+    echo -e "    ${C}run${RESET}          Run the full interactive setup wizard ${D}(default)${RESET}"
+    echo -e "    ${C}phase <n>${RESET}    Run a single phase (1–13) non-interactively"
+    echo -e "    ${C}status${RESET}       Show current server hardening status"
+    echo -e "    ${C}logs${RESET}         View recent setup logs"
+    echo -e "    ${C}reset${RESET}        Reset server configuration (revert SSH, UFW, users)"
+    echo -e "    ${C}update${RESET}       Update forge to the latest version"
+    echo -e "    ${C}uninstall${RESET}    Remove forge from this system"
+    echo -e "    ${C}version${RESET}      Show version"
+    echo -e "    ${C}help${RESET}         Show this message"
+    echo ""
+    echo -e "  ${W}Phases:${RESET}"
+    echo -e "    ${D}1${RESET}  System update & hostname"
+    echo -e "    ${D}2${RESET}  Create non-root admin user"
+    echo -e "    ${D}3${RESET}  SSH hardening"
+    echo -e "    ${D}4${RESET}  UFW firewall"
+    echo -e "    ${D}5${RESET}  Fail2ban brute-force protection"
+    echo -e "    ${D}6${RESET}  Kernel / sysctl hardening"
+    echo -e "    ${D}7${RESET}  Rootkit detection"
+    echo -e "    ${D}8${RESET}  Automatic security updates"
+    echo -e "    ${D}9${RESET}  Docker installation"
+    echo -e "    ${D}10${RESET} CapRover installation"
+    echo -e "    ${D}11${RESET} Monitoring tools"
+    echo -e "    ${D}12${RESET}  Lynis security audit"
+    echo -e "    ${D}13${RESET}  Config backup"
+    echo -e "    ${D}14${RESET}  Swap file creation"
+    echo ""
+
+    echo -e "  ${W}Examples:${RESET}"
+    echo -e "    ${D}sudo forge${RESET}              # interactive wizard"
+    echo -e "    ${D}sudo forge run${RESET}          # same as above"
+    echo -e "    ${D}sudo forge phase 5${RESET}      # run fail2ban setup only"
+    echo -e "    ${D}sudo forge status${RESET}       # check what's hardened"
+    echo -e "    ${D}sudo forge update${RESET}       # self-update"
+    echo ""
+}
+
+# ─── VERSION ──────────────────────────────────────────────────────────────────
+cmd_version() {
+    echo -e "${C}forge${RESET} version ${W}${VERSION}${RESET}"
+}
+
+# ─── LOGS ─────────────────────────────────────────────────────────────────────
+cmd_logs() {
+    echo -e "\n${W}  VPS Wizard logs in ${LOG_DIR}:${RESET}\n"
+    local logs
+    logs=$(ls -lt "$LOG_DIR"/*.log 2>/dev/null | head -10)
+    if [[ -z "$logs" ]]; then
+        echo -e "  ${D}No logs found yet.${RESET}\n"
+        return
+    fi
+    echo "$logs"
+    echo ""
+    echo -en "  ${C}?${RESET} ${W}View most recent log?${RESET} [${G}Y${RESET}/${D}n${RESET}]: "
+    read -r ans
+    if [[ ! "$ans" =~ ^[Nn] ]]; then
+        local latest
+        latest=$(ls -t "$LOG_DIR"/*.log 2>/dev/null | head -1)
+        echo ""
+        less -R "$latest"
+    fi
+}
+
+# ─── STATUS ───────────────────────────────────────────────────────────────────
+cmd_status() {
+    banner "Server Hardening Status"
+
+    _check() {
+        local label=$1 cmd=$2
+        if eval "$cmd" &>/dev/null 2>&1; then
+            echo -e "  ${OK} ${label}"
+        else
+            echo -e "  ${ERR} ${R}${label}${RESET}"
+        fi
+    }
+
+    _val() {
+        local label=$1; shift
+        local value
+        value=$(eval "$@" 2>/dev/null || echo "unknown")
+        echo -e "  ${ARROW} ${D}${label}:${RESET} ${W}${value}${RESET}"
+    }
+
+    echo -e "  ${W}System${RESET}"
+    _val "Hostname"      "hostname"
+    _val "OS"            "lsb_release -ds 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"'"
+    _val "Uptime"        "uptime -p"
+    _val "Kernel"        "uname -r"
+    _val "Swap"          "free -h | awk '/Swap/ {print \$3 \" used of \" \$2}'"
+    echo ""
+
+    echo -e "  ${W}Security${RESET}"
+    _check "UFW firewall active"         "ufw status | grep -q 'Status: active'"
+    _check "Fail2ban running"            "systemctl is-active fail2ban"
+    _check "Unattended upgrades enabled" "systemctl is-active unattended-upgrades"
+    _check "Root login disabled (SSH)"   "grep -q '^PermitRootLogin no' /etc/ssh/sshd_config"
+    _check "Password auth disabled (SSH)" "grep -q '^PasswordAuthentication no' /etc/ssh/sshd_config"
+    echo ""
+
+    echo -e "  ${W}Services${RESET}"
+    _check "Docker running"              "systemctl is-active docker"
+    _check "SSH service running"         "systemctl is-active ssh"
+    if systemctl is-active --quiet ssh.socket; then
+        echo -e "  ${Y}⚠ SSH Socket is ACTIVE (may ignore sshd_config port)${RESET}"
+    else
+        echo -e "  ${OK} SSH persistent service is in control${RESET}"
+    fi
+    _check "CapRover container"          "docker ps 2>/dev/null | grep -q caprover"
+    echo ""
+
+    echo -e "  ${W}SSH Config${RESET}"
+    local sshport
+    sshport=$(grep -E '^Port ' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -n 1)
+    sshport=${sshport:-22}
+    _val "Configured SSH port" "echo $sshport"
+
+    if [[ -n "$(command -v ufw)" ]] && ufw status | grep -q 'Status: active'; then
+        if ufw status | grep -E "^$sshport/tcp\s+ALLOW" >/dev/null; then
+             echo -e "  ${OK} ${G}Firewall allows port $sshport${RESET}"
+        else
+             echo -e "  ${ERR} ${R}Firewall BLOCKS port $sshport${RESET}"
+        fi
+        
+        # Check for port 22 if it's not the configured port
+        if [[ "$sshport" != "22" ]] && ufw status | grep -E "^22/tcp\s+ALLOW" >/dev/null; then
+            echo -e "  ${Y}⚠  Warning: Port 22 is still open in firewall (should be closed)${RESET}"
+        fi
+    fi
+    echo ""
+
+    echo -e "  ${W}Open Ports${RESET}"
+    if command -v ss &>/dev/null; then
+        ss -tulpn 2>/dev/null | grep LISTEN | awk '{print "  " $5}' | sort -u
+    fi
+    echo ""
+
+    echo -e "  ${W}Disk & Memory${RESET}"
+    df -h / | awk 'NR==2{printf "  '"${ARROW}"' Disk:    '"${W}"'%s used'"${RESET}"' of %s\n", $3, $2}'
+    free -h | awk 'NR==2{printf "  '"${ARROW}"' Memory:  '"${W}"'%s used'"${RESET}"' of %s\n", $3, $2}'
+    echo ""
+}
+
+# ─── UPDATE ───────────────────────────────────────────────────────────────────
+cmd_update() {
+    require_root update
+    banner "Self-Update"
+
+    info "Fetching latest version from GitHub..."
+
+    local tmp
+    tmp=$(mktemp)
+
+    if curl -fsSL "${GITHUB_RAW}/forge" -o "$tmp" 2>>"$LOG_FILE"; then
+        local remote_version
+        remote_version=$(grep '^VERSION=' "$tmp" | head -1 | cut -d'"' -f2)
+
+        if [[ "$remote_version" == "$VERSION" ]]; then
+            ok "Already on the latest version (${VERSION})"
+            rm -f "$tmp"
+            return
+        fi
+
+        info "Updating ${VERSION} → ${remote_version}..."
+        chmod +x "$tmp"
+        mv "$tmp" "$INSTALL_PATH"
+        ok "Updated to v${remote_version}"
+        note "Run: forge version — to confirm"
+    else
+        error "Could not reach GitHub. Check your internet connection."
+        note "Manual update: curl -fsSL ${GITHUB_RAW}/forge | sudo tee ${INSTALL_PATH} && sudo chmod +x ${INSTALL_PATH}"
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+# ─── UNINSTALL ────────────────────────────────────────────────────────────────
+cmd_uninstall() {
+    require_root uninstall
+
+    echo ""
+    if confirm "Remove forge from this system?" "n"; then
+        rm -f "$INSTALL_PATH"
+        ok "forge removed from ${INSTALL_PATH}"
+        note "Logs are kept at ${LOG_DIR}"
+        note "To also remove logs: sudo rm -rf ${LOG_DIR}"
+    else
+        echo -e "  ${D}Uninstall cancelled.${RESET}"
+    fi
+    echo ""
+}
+
+# ─── CMD: Reset ───────────────────────────────────────────────────────────────
+cmd_reset() {
+    require_root reset
+    banner "Server Reset / Restore"
+    echo -e "  ${Y}⚠  WARNING: This will revert SSH config and remove the admin user.${RESET}"
+    echo ""
+
+    if ! confirm "Reset server configuration back to default?" "n"; then
+        echo -e "  ${D}Reset cancelled.${RESET}"
+        return
+    fi
+
+    # 1. Detect Admin User (while sshd_config is still modified)
+    local sshd_conf="/etc/ssh/sshd_config"
+    local user_to_remove
+    # Try AllowUsers first
+    user_to_remove=$(grep -E "^AllowUsers " "$sshd_conf" | awk '{print $2}' | head -n 1 || true)
+
+    # If not found, look for common names or ask
+    if [[ -z "$user_to_remove" ]]; then
+        if [[ -d "/home/deploy" ]]; then
+            user_to_remove="deploy"
+        fi
+    fi
+
+    # 2. Revert SSH
+    if [[ -f "${sshd_conf}.bak" ]]; then
+        info "Restoring SSH config from backup..."
+        cp "${sshd_conf}.bak" "$sshd_conf"
+        
+        # Restore ssh.socket if it was masked (common in modern Ubuntu)
+        if systemctl list-unit-files | grep -q "^ssh.socket.*masked"; then
+            info "Restoring ssh.socket activation..."
+            systemctl unmask ssh.socket >> "$LOG_FILE" 2>&1 || true
+            systemctl enable ssh.socket >> "$LOG_FILE" 2>&1 || true
+            systemctl start ssh.socket >> "$LOG_FILE" 2>&1 || true
+            systemctl stop ssh >> "$LOG_FILE" 2>&1 || true
+        else
+            systemctl restart ssh
+        fi
+        ok "SSH config restored"
+    else
+        warn "No SSH backup found (/etc/ssh/sshd_config.bak). Keeping current config."
+    fi
+
+    # 3. Reset Firewall
+    if command -v ufw &>/dev/null; then
+        info "Resetting UFW firewall..."
+        ufw --force reset &>/dev/null
+        ufw --force disable &>/dev/null
+        ok "UFW reset and disabled"
+    fi
+
+    # 4. Remove Admin User
+    if [[ -n "$user_to_remove" ]]; then
+        if confirm "Remove user '${user_to_remove}' and their home directory?" "y"; then
+            deluser --remove-home "$user_to_remove" &>/dev/null || true
+            ok "User '${user_to_remove}' removed"
+        fi
+    fi
+
+    # 5. Remove fail2ban custom config
+    if [[ -f "/etc/fail2ban/jail.d/sshd-custom.conf" ]]; then
+        rm -f "/etc/fail2ban/jail.d/sshd-custom.conf"
+        systemctl restart fail2ban &>/dev/null || true
+        ok "Fail2ban custom config removed"
+    fi
+
+    # 6. Optional Docker/CapRover removal
+    if command -v docker &>/dev/null; then
+        if confirm "Remove Docker and all containers/data?" "n"; then
+            info "Stopping containers and purging Docker..."
+            docker ps -aq | xargs docker rm -f &>/dev/null || true
+            apt-get purge -y docker-ce docker-ce-cli containerd.io &>/dev/null || true
+            rm -rf /var/lib/docker
+            ok "Docker removed"
+        fi
+    fi
+
+    # 7. Remove Swap file
+    if [[ -f "/swapfile" ]]; then
+        if confirm "Remove swap file and restore fstab?" "n"; then
+            info "Disabling and removing /swapfile..."
+            swapoff /swapfile >> "$LOG_FILE" 2>&1 || true
+            rm -f /swapfile
+            sed -i '/\/swapfile/d' /etc/fstab
+            ok "Swap file removed"
+        fi
+    fi
+
+    echo ""
+    ok "Reset complete. Server is back to (mostly) default state."
+    echo ""
+}
+
+# ─── SPLASH ───────────────────────────────────────────────────────────────────
+splash() {
+    clear
+    echo ""
+    echo -e "${C}${BOLD}"
+    echo "        ███████╗ ██████╗ ██████╗  ██████╗ ███████╗"
+    echo "        ██╔════╝██╔═══██╗██╔══██╗██╔════╝ ██╔════╝"
+    echo "        █████╗  ██║   ██║██████╔╝██║  ███╗█████╗  "
+    echo "        ██╔══╝  ██║   ██║██╔══██╗██║   ██║██╔══╝  "
+    echo "        ██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗"
+    echo "        ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝"
+    echo -e "${RESET}"
+    echo -e "     ${D}v${VERSION}  ·  Automated Server Setup & Security Hardening  ·  Ubuntu 22.04${RESET}"
+    echo ""
+    echo -e "  ${C}┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄${RESET}"
+    echo ""
+    echo -e "  ${W}This wizard will configure your server phase by phase.${RESET}"
+    echo -e "  ${D}You will be prompted before every critical action.${RESET}"
+    echo -e "  ${D}All output is logged to: ${W}${LOG_FILE}${RESET}"
+    echo ""
+    echo -e "  ${Y}⚠  Requirements:${RESET}  Fresh Ubuntu 22.04 LTS · Root access · Internet"
+    echo -e "  ${Y}⚠  Before starting:${RESET} Have your SSH public key ready (from local machine)."
+    echo ""
+}
+
+# ─── PHASE MENU ───────────────────────────────────────────────────────────────
+phase_menu() {
+    section "Phase Selection"
+    echo -e "  ${C}[a]${RESET} Run ALL phases  ${D}(recommended for a fresh VPS)${RESET}"
+    echo -e "  ${C}[s]${RESET} Select specific phases"
+    echo ""
+    echo -en "  ${C}?${RESET} ${W}Your choice${RESET} [${G}a${RESET}/${D}s${RESET}]: "
+    read -r choice
+
+    if [[ "$choice" =~ ^[Ss] ]]; then
+        echo ""
+        echo -e "  ${D}Available phases:${RESET}"
+        echo -e "   ${C}[1]${RESET}  System update & hostname"
+        echo -e "   ${C}[2]${RESET}  Create non-root admin user"
+        echo -e "   ${C}[3]${RESET}  SSH hardening (port, key-auth, disable root)"
+        echo -e "   ${C}[4]${RESET}  UFW Firewall"
+        echo -e "   ${C}[5]${RESET}  Fail2ban brute-force protection"
+        echo -e "   ${C}[6]${RESET}  Kernel / sysctl network hardening"
+        echo -e "   ${C}[7]${RESET}  Rootkit detection (rkhunter + chkrootkit)"
+        echo -e "   ${C}[8]${RESET}  Automatic security updates"
+        echo -e "   ${C}[9]${RESET}  Docker CE installation"
+        echo -e "   ${C}[10]${RESET} CapRover installation"
+        echo -e "   ${C}[11]${RESET} Monitoring tools (htop, iotop, nethogs…)"
+        echo -e "   ${C}[12]${RESET}  Lynis security audit"
+        echo -e "   ${C}[13]${RESET}  Config backup"
+        echo -e "   ${C}[14]${RESET}  Swap file creation"
+        echo ""
+        echo -e "  ${D}Enter numbers separated by spaces (e.g. 1 2 3 4 5):${RESET}"
+        echo -en "  ${C}?${RESET} ${W}Phases${RESET}: "
+        read -r -a PHASES_RUN
+        else
+        PHASES_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14)
+        fi
+
+    log "Phases selected: ${PHASES_RUN[*]}"
+}
+
+# ─── GATHER CONFIG ────────────────────────────────────────────────────────────
+gather_config() {
+    section "Configuration"
+    echo -e "  ${D}Collecting information before making any changes.\n${RESET}"
+
+    local current_ssh_port
+    current_ssh_port=$(grep -E "^Port " /etc/ssh/sshd_config 2>/dev/null | awk "{print \$2}" || echo "22")
+
+    if has_phase 2 || has_phase 3; then
+        ask ADMIN_USER "Admin username to create" "deploy"
+        echo ""
+    fi
+
+    if has_phase 3; then
+        ask SSH_PORT "New SSH port" "2222"
+        echo ""
+    fi
+
+    if has_phase 3; then
+        read_ssh_pubkey
+    fi
+
+    if has_phase 1; then
+        ask SERVER_HOSTNAME "Server hostname" "vps-server"
+        ask SERVER_TIMEZONE "Timezone" "UTC"
+        echo ""
+    fi
+
+    if has_phase 4 || has_phase 5; then
+        # If we didn't run phase 3, make sure SSH_PORT is set to current
+        if ! has_phase 3; then
+            SSH_PORT="$current_ssh_port"
+        fi
+    fi
+
+    if has_phase 4; then
+        ask SSH_PORT "Confirm SSH port to open in firewall" "$SSH_PORT"
+        echo ""
+        echo -e "  ${C}?${RESET} ${W}Extra ports to open${RESET} ${D}(space-separated e.g. 8080 5432, or blank):${RESET}"
+        echo -en "  ${D}> ${RESET}"
+        read -r -a EXTRA_PORTS
+        echo ""
+        confirm "Enable Docker Swarm cluster ports?" "n" && OPEN_SWARM=true || OPEN_SWARM=false
+        echo ""
+    fi
+
+    if has_phase 10; then
+        if confirm "Install CapRover? (requires Docker)" "y"; then
+            INSTALL_CAPROVER=true
+            ask DOMAIN "Root domain for CapRover (e.g. example.com)" ""
+            note "Required DNS: A captain.${DOMAIN} → this server IP"
+            note "Required DNS: A *.${DOMAIN} → this server IP"
+        fi
+        echo ""
+    fi
+
+    # Summary
+    echo ""
+    echo -e "  ${C}───────────────────────── Summary ──────────────────────────${RESET}"
+    has_phase 1  && echo -e "   ${OK} System update · hostname: ${W}${SERVER_HOSTNAME}${RESET} · tz: ${W}${SERVER_TIMEZONE}${RESET}"
+    has_phase 2  && echo -e "   ${OK} Admin user: ${W}${ADMIN_USER}${RESET}"
+    has_phase 3  && echo -e "   ${OK} SSH port: ${W}${SSH_PORT}${RESET} · key-only · root login disabled"
+    has_phase 4  && echo -e "   ${OK} UFW firewall · extra ports: ${W}${EXTRA_PORTS[*]:-none}${RESET}"
+    has_phase 5  && echo -e "   ${OK} Fail2ban"
+    has_phase 6  && echo -e "   ${OK} Kernel sysctl hardening"
+    has_phase 7  && echo -e "   ${OK} Rootkit detection"
+    has_phase 8  && echo -e "   ${OK} Unattended upgrades"
+    has_phase 9  && echo -e "   ${OK} Docker CE"
+    ${INSTALL_CAPROVER:-false} && echo -e "   ${OK} CapRover · domain: ${W}${DOMAIN}${RESET}"
+    has_phase 11 && echo -e "   ${OK} Monitoring tools"
+    has_phase 12 && echo -e "   ${OK} Lynis audit"
+    has_phase 13 && echo -e "   ${OK} Config backup"
+    echo -e "  ${C}────────────────────────────────────────────────────────────${RESET}"
+    echo ""
+
+    confirm "Start the wizard?" "y" || { echo -e "\n${Y}  Aborted — no changes made.${RESET}\n"; exit 0; }
+}
+
+# ─── PHASES ───────────────────────────────────────────────────────────────────
+
+phase_system_update() {
+    banner "Phase 1 · System Update & Hostname"
+    info "Updating package lists..."
+    run apt-get update
+    ok "Package lists updated"
+    info "Upgrading packages (may take a few minutes)..."
+    DEBIAN_FRONTEND=noninteractive run apt-get upgrade -y
+    ok "Packages upgraded"
+    run apt-get autoremove -y
+    ok "Cleanup done"
+    info "Setting hostname: ${SERVER_HOSTNAME}"
+    run hostnamectl set-hostname "$SERVER_HOSTNAME"
+    grep -q "$SERVER_HOSTNAME" /etc/hosts || echo "127.0.1.1 $SERVER_HOSTNAME" >> /etc/hosts
+    ok "Hostname: $(hostnamectl --static)"
+    info "Setting timezone: ${SERVER_TIMEZONE}"
+    timedatectl set-timezone "$SERVER_TIMEZONE" >> "$LOG_FILE" 2>&1 && ok "Timezone set" || warn "Invalid timezone: ${SERVER_TIMEZONE}"
+    ok "Phase 1 complete"
+}
+
+phase_create_user() {
+    banner "Phase 2 · Create Non-Root Admin User"
+    if id "$ADMIN_USER" &>/dev/null; then
+        warn "User '${ADMIN_USER}' already exists — skipping"
+    else
+        info "Creating user: ${ADMIN_USER}"
+        echo ""
+        echo -e "  ${Y}⚠  Set a strong password for ${ADMIN_USER}:${RESET}"
+        adduser --gecos "" "$ADMIN_USER"
+        ok "User '${ADMIN_USER}' created"
+    fi
+    usermod -aG sudo "$ADMIN_USER"
+    ok "${ADMIN_USER} has sudo privileges"
+    ok "Phase 2 complete"
+}
+
+phase_ssh_hardening() {
+    banner "Phase 3 · SSH Hardening"
+    local sshd_conf="/etc/ssh/sshd_config"
+    local original_port
+    original_port=$(grep -E "^Port " "$sshd_conf" | awk '{print $2}' | head -n 1 || true)
+    original_port=${original_port:-22}
+    [[ ! -f "${sshd_conf}.bak" ]] && cp "$sshd_conf" "${sshd_conf}.bak" && ok "Backup: ${sshd_conf}.bak"
+
+    info "Installing SSH key for ${ADMIN_USER}..."
+    local ssh_dir="/home/${ADMIN_USER}/.ssh"
+    mkdir -p "$ssh_dir"
+    chmod 700 "$ssh_dir"
+    echo "$SSH_PUB_KEY" > "${ssh_dir}/authorized_keys"
+    chmod 600 "${ssh_dir}/authorized_keys"
+    chown -R "${ADMIN_USER}:${ADMIN_USER}" "$ssh_dir"
+    ok "SSH key installed"
+
+    # Pre-open the new port in UFW if it exists, to prevent lockout
+    if command -v ufw &>/dev/null; then
+        ufw allow "${SSH_PORT}/tcp" comment "SSH Temp" >> "$LOG_FILE" 2>&1
+    fi
+
+    info "Writing hardened sshd_config (port ${SSH_PORT})..."
+    cat > "$sshd_conf" <<SSHEOF
+# ======================================================
+# Hardened SSH — generated by forge v${VERSION}
+# ======================================================
+Protocol 2
+Port ${SSH_PORT}
+
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+ChallengeResponseAuthentication no
+PermitEmptyPasswords no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+AllowUsers ${ADMIN_USER}
+MaxAuthTries 3
+MaxSessions 5
+LoginGraceTime 30
+
+X11Forwarding no
+AllowAgentForwarding no
+AllowTcpForwarding no
+
+ClientAliveInterval 300
+ClientAliveCountMax 2
+
+UsePAM yes
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/openssh/sftp-server
+SSHEOF
+
+    # Handle ssh.socket (modern Ubuntu/systemd)
+    if systemctl is-active --quiet ssh.socket; then
+        info "Switching from ssh.socket to persistent ssh.service..."
+        systemctl stop ssh.socket >> "$LOG_FILE" 2>&1 || true
+        systemctl disable ssh.socket >> "$LOG_FILE" 2>&1 || true
+        systemctl mask ssh.socket >> "$LOG_FILE" 2>&1 || true
+    fi
+
+    if systemctl restart ssh >> "$LOG_FILE" 2>&1; then
+        systemctl enable ssh >> "$LOG_FILE" 2>&1 || true
+        ok "SSH restarted on port ${SSH_PORT}"
+    else
+        error "SSH restart failed — restoring backup"
+        cp "${sshd_conf}.bak" "$sshd_conf"
+        systemctl restart ssh
+        return 1
+    fi
+
+    echo ""
+    echo -e "  ${R}${BOLD}OPEN A NEW TERMINAL NOW AND TEST:${RESET}"
+    echo -e "  ${W}  ssh -p ${SSH_PORT} ${ADMIN_USER}@$(hostname -I | awk '{print $1}')${RESET}"
+    echo -e "  ${Y}  ⚠  Do NOT close this session until login is confirmed!${RESET}"
+    echo -e "  ${D}  (If you get 'Connection refused', you MUST open port ${SSH_PORT}${RESET}"
+    echo -e "  ${D}   in your VPS provider's Cloud Console / Security Groups)${RESET}"
+    echo ""
+    pause
+
+    local success=true
+    if confirm "Did SSH login on port ${SSH_PORT} work?" "y"; then
+        ok "SSH confirmed — hardening locked in"
+    else
+        success=false
+        warn "Reverting SSH config..."
+        if [[ -f "${sshd_conf}.bak" ]]; then
+            cp "${sshd_conf}.bak" "$sshd_conf"
+            
+            # If we masked ssh.socket, unmask it on revert
+            if systemctl list-unit-files | grep -q "^ssh.socket.*masked"; then
+                systemctl unmask ssh.socket >> "$LOG_FILE" 2>&1 || true
+                systemctl enable ssh.socket >> "$LOG_FILE" 2>&1 || true
+                systemctl start ssh.socket >> "$LOG_FILE" 2>&1 || true
+                systemctl stop ssh >> "$LOG_FILE" 2>&1 || true
+            else
+                systemctl restart ssh
+            fi
+            
+            SSH_PORT="$original_port"
+            ok "Original sshd_config restored (Port ${SSH_PORT})"
+        else
+            error "No backup found! SSH might be in an inconsistent state."
+        fi
+    fi
+
+    echo ""
+    if $success; then
+        echo -e "  ${D}Add to your LOCAL ~/.ssh/config:${RESET}"
+        echo -e "  ${C}  Host $(hostname -s)${RESET}"
+        echo -e "  ${C}    HostName $(hostname -I | awk '{print $1}')${RESET}"
+        echo -e "  ${C}    User ${ADMIN_USER}${RESET}"
+        echo -e "  ${C}    Port ${SSH_PORT}${RESET}"
+        echo -e "  ${C}    IdentityFile ~/.ssh/id_ed25519${RESET}"
+        echo ""
+        ok "Phase 3 complete (SSH Hardened)"
+    else
+        warn "Phase 3 finished with revert (SSH on port ${SSH_PORT})"
+    fi
+}
+
+phase_ufw() {
+    banner "Phase 4 · UFW Firewall"
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y ufw
+    ufw --force default deny incoming  >> "$LOG_FILE" 2>&1
+    ufw --force default allow outgoing >> "$LOG_FILE" 2>&1
+    ok "Default policies: deny in / allow out"
+    ufw allow "${SSH_PORT}/tcp" comment "SSH"   >> "$LOG_FILE" 2>&1 && ok "SSH port ${SSH_PORT} open"
+    ufw allow 80/tcp  comment "HTTP"            >> "$LOG_FILE" 2>&1 && ok "HTTP (80) open"
+    ufw allow 443/tcp comment "HTTPS"           >> "$LOG_FILE" 2>&1 && ok "HTTPS (443) open"
+    ${INSTALL_CAPROVER:-false} && { ufw allow 3000/tcp comment "CapRover" >> "$LOG_FILE" 2>&1 && ok "CapRover (3000) open"; }
+    if $OPEN_SWARM; then
+        for p in "2377/tcp:Docker Swarm" "7946/tcp:Docker Nodes" "7946/udp:Docker Nodes" "4789/udp:Docker Overlay"; do
+            ufw allow "${p%%:*}" comment "${p##*:}" >> "$LOG_FILE" 2>&1
+        done
+        ok "Docker Swarm ports open"
+    fi
+    for port in "${EXTRA_PORTS[@]}"; do
+        [[ -z "$port" ]] && continue
+        ufw allow "${port}/tcp" comment "Custom" >> "$LOG_FILE" 2>&1 && ok "Port ${port} open"
+    done
+    ufw --force enable >> "$LOG_FILE" 2>&1 && ok "UFW enabled"
+    echo ""; ufw status verbose; echo ""
+    ok "Phase 4 complete"
+}
+
+phase_fail2ban() {
+    banner "Phase 5 · Fail2ban"
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y fail2ban
+    cp /etc/fail2ban/jail.conf /etc/fail2ban/jail.local
+    cat > /etc/fail2ban/jail.d/sshd-custom.conf <<F2BEOF
+[sshd]
+enabled  = true
+port     = ${SSH_PORT}
+filter   = sshd
+logpath  = /var/log/auth.log
+maxretry = 3
+bantime  = 3600
+findtime = 600
+F2BEOF
+    systemctl start fail2ban  >> "$LOG_FILE" 2>&1
+    systemctl enable fail2ban >> "$LOG_FILE" 2>&1
+    ok "fail2ban running — 3 tries → 1hr ban on port ${SSH_PORT}"
+    echo ""; fail2ban-client status sshd 2>/dev/null || true; echo ""
+    ok "Phase 5 complete"
+}
+
+phase_kernel_hardening() {
+    banner "Phase 6 · Kernel / sysctl Hardening"
+    cat >> /etc/sysctl.conf <<SYSCTL
+
+# ── forge v${VERSION}: Network Security ──────────────────────────────────
+net.ipv4.ip_forward = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.tcp_rfc1337 = 1
+fs.file-max = 65535
+SYSCTL
+    sysctl -p >> "$LOG_FILE" 2>&1
+    ok "sysctl parameters applied"
+    ok "Phase 6 complete"
+}
+
+phase_rootkit() {
+    banner "Phase 7 · Rootkit Detection"
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y rkhunter chkrootkit
+    rkhunter --update  >> "$LOG_FILE" 2>&1 || true
+    rkhunter --propupd >> "$LOG_FILE" 2>&1 || true
+    ok "rkhunter database updated"
+    if confirm "Run rootkit scan now? (~2 min)" "y"; then
+        echo ""
+        rkhunter --check --skip-keypress --report-warnings-only 2>&1 | tee -a "$LOG_FILE" | grep -E "(Warning|Rootkit|Suspicious|Found)" || echo -e "  ${G}  No warnings found.${RESET}"
+        echo ""
+        chkrootkit 2>&1 | tee -a "$LOG_FILE" | grep -v "not infected" | grep -v "^$" | head -20 || true
+    else
+        skip "Rootkit scan — run manually: sudo rkhunter --check --skip-keypress"
+    fi
+    ok "Phase 7 complete"
+}
+
+phase_auto_updates() {
+    banner "Phase 8 · Automatic Security Updates"
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y unattended-upgrades apt-listchanges
+    cat > /etc/apt/apt.conf.d/50unattended-upgrades <<UUEOF
+Unattended-Upgrade::Allowed-Origins {
+    "\${distro_id}:\${distro_codename}";
+    "\${distro_id}:\${distro_codename}-security";
+    "\${distro_id}ESMApps:\${distro_codename}-apps-security";
+    "\${distro_id}ESM:\${distro_codename}-infra-security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::MinimalSteps "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+UUEOF
+    cat > /etc/apt/apt.conf.d/20auto-upgrades <<UUEOF2
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+UUEOF2
+    systemctl enable unattended-upgrades >> "$LOG_FILE" 2>&1
+    systemctl start  unattended-upgrades >> "$LOG_FILE" 2>&1
+    ok "Automatic security upgrades enabled"
+    ok "Phase 8 complete"
+}
+
+phase_docker() {
+    banner "Phase 9 · Docker CE"
+    if command -v docker &>/dev/null; then
+        ok "Docker already installed: $(docker --version)"; return
+    fi
+    apt-get remove -y docker docker-engine docker.io containerd runc >> "$LOG_FILE" 2>&1 || true
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y ca-certificates curl gnupg lsb-release
+    mkdir -p /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    chmod a+r /etc/apt/keyrings/docker.gpg
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
+        | tee /etc/apt/sources.list.d/docker.list > /dev/null
+    run apt-get update
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y \
+        docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    systemctl start  docker >> "$LOG_FILE" 2>&1
+    systemctl enable docker >> "$LOG_FILE" 2>&1
+    ok "Docker CE installed and running"
+    [[ -n "$ADMIN_USER" ]] && id "$ADMIN_USER" &>/dev/null && usermod -aG docker "$ADMIN_USER" && ok "${ADMIN_USER} added to docker group"
+    docker --version
+    ok "Phase 9 complete"
+}
+
+phase_caprover() {
+    banner "Phase 10 · CapRover"
+    command -v docker &>/dev/null || { error "Docker not installed. Run: sudo forge phase 9"; return 1; }
+    [[ -z "$DOMAIN" ]] && ask DOMAIN "Root domain" ""
+    echo ""
+    echo -e "  ${Y}⚠  Required DNS records:${RESET}"
+    echo -e "  ${W}  A  captain.${DOMAIN}  →  $(hostname -I | awk '{print $1}')${RESET}"
+    echo -e "  ${W}  A  *.${DOMAIN}        →  $(hostname -I | awk '{print $1}')${RESET}"
+    echo ""
+    if confirm "DNS configured and ready?" "y"; then
+        docker run -d \
+            -p 80:80 -p 443:443 -p 3000:3000 \
+            -e ACCEPTED_TERMS=true \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v /captain:/captain \
+            --name caprover \
+            --restart unless-stopped \
+            caprover/caprover >> "$LOG_FILE" 2>&1
+        ok "CapRover container started"
+        info "Waiting 30 seconds for init..."
+        sleep 30
+        echo ""
+        echo -e "  ${G}${BOLD}CapRover ready!${RESET}"
+        echo -e "  ${D}Dashboard:${RESET} ${W}http://captain.${DOMAIN}:3000${RESET}"
+        echo -e "  ${D}Default Pass:${RESET} ${G}captain42${RESET} ${D}(Change immediately after login)${RESET}"
+        echo -e "  ${D}Note:${RESET} ${D}After running ${W}caprover serversetup${D}, you can access via port 80/443.${RESET}"
+        echo ""
+        echo -e "  ${D}CLI setup:${RESET} ${W}npm install -g caprover && caprover serversetup${RESET}"
+    else
+        skip "CapRover — run later: sudo forge phase 10"
+    fi
+    ok "Phase 10 complete"
+}
+
+phase_monitoring() {
+    banner "Phase 11 · Monitoring Tools"
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y htop iotop nethogs ncdu logwatch net-tools
+    ok "Installed: htop · iotop · nethogs · ncdu · logwatch · net-tools"
+    echo ""
+    echo -e "   ${C}htop${RESET}      CPU/memory monitor"
+    echo -e "   ${C}iotop${RESET}     Disk I/O per process"
+    echo -e "   ${C}nethogs${RESET}   Network traffic per process"
+    echo -e "   ${C}ncdu /${RESET}    Disk usage explorer"
+    echo -e "   ${C}ss -tulpn${RESET} Open ports"
+    echo ""
+    ok "Phase 11 complete"
+}
+
+phase_lynis() {
+    banner "Phase 12 · Lynis Security Audit"
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y lynis
+    if confirm "Run full Lynis audit now? (~3 min)" "y"; then
+        echo ""
+        lynis audit system --quiet 2>&1 | tee -a "$LOG_FILE" | grep -E "(WARNING|SUGGESTION|Hardening index)" | head -40 || true
+        echo ""
+        note "Full report: $LOG_FILE"
+        note "Re-run anytime: sudo lynis audit system"
+    else
+        skip "Lynis audit — run manually: sudo lynis audit system"
+    fi
+    ok "Phase 12 complete"
+}
+
+phase_backup() {
+    banner "Phase 13 · Config Backup"
+    local backup_file="/root/vps-config-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar -czf "$backup_file" \
+        /etc/ssh/sshd_config \
+        /etc/ufw/ \
+        /etc/fail2ban/ \
+        /etc/sysctl.conf \
+        /etc/apt/apt.conf.d/50unattended-upgrades \
+        "$LOG_FILE" \
+        2>/dev/null || true
+    ok "Backup: ${backup_file}"
+    echo ""
+    echo -e "  ${Y}⚠  Copy this offsite:${RESET}"
+    echo -e "  ${W}  scp root@$(hostname -I | awk '{print $1}'):${backup_file} ./vps-backup.tar.gz${RESET}"
+    echo ""
+    ok "Phase 13 complete"
+}
+
+# ─── FINAL SUMMARY ────────────────────────────────────────────────────────────
+print_summary() {
+    echo ""
+    echo -e "${G}${BOLD}"
+    echo "  ╔═══════════════════════════════════════════════════════════╗"
+    echo "  ║         ✔  VPS SETUP COMPLETE                            ║"
+    echo "  ╚═══════════════════════════════════════════════════════════╝"
+    echo -e "${RESET}"
+    echo -e "  ${W}Quick reference:${RESET}"
+    echo ""
+    [[ -n "$ADMIN_USER" ]] && \
+    echo -e "  ${C}SSH:${RESET}           ssh -p ${SSH_PORT} ${ADMIN_USER}@$(hostname -I | awk '{print $1}')"
+    echo -e "  ${C}Firewall:${RESET}      sudo ufw status verbose"
+    echo -e "  ${C}Fail2ban:${RESET}      sudo fail2ban-client status sshd"
+    echo -e "  ${C}Open ports:${RESET}    sudo ss -tulpn"
+    echo -e "  ${C}Auth log:${RESET}      sudo tail -50 /var/log/auth.log"
+    echo -e "  ${C}Docker:${RESET}        docker ps"
+    echo -e "  ${C}Audit:${RESET}         sudo lynis audit system"
+    echo -e "  ${C}Wizard status:${RESET} sudo forge status"
+    echo -e "  ${C}Wizard update:${RESET} sudo forge update"
+    echo ""
+    ${INSTALL_CAPROVER:-false} && [[ -n "$DOMAIN" ]] && \
+    echo -e "  ${C}CapRover:${RESET}      http://captain.${DOMAIN}:3000"
+    echo ""
+    echo -e "  ${D}Setup log: ${W}${LOG_FILE}${RESET}"
+    echo ""
+}
+
+# ─── CMD: run single phase ────────────────────────────────────────────────────
+cmd_phase() {
+    require_root
+    local n="${1:-}"
+    if [[ -z "$n" ]] || ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < 1 || n > 13 )); then
+        error "Usage: sudo forge phase <1-13>"
+        echo ""
+        cmd_help
+        exit 1
+    fi
+
+    PHASES_RUN=("$n")
+
+    # For phases that need runtime vars, prompt only what's needed
+    case "$n" in
+        1) ask SERVER_HOSTNAME "Hostname" "vps-server"; ask SERVER_TIMEZONE "Timezone" "UTC" ;;
+        2) ask ADMIN_USER "Admin username" "deploy" ;;
+        3) ask ADMIN_USER "Admin username" "deploy"
+           ask SSH_PORT "SSH port" "2222"
+           read_ssh_pubkey ;;
+        4) ask SSH_PORT "SSH port in use" "2222"
+           echo -e "  ${C}?${RESET} ${W}Extra ports (space-separated, blank=none)${RESET}:"
+           echo -en "  ${D}> ${RESET}"; read -r -a EXTRA_PORTS
+           confirm "Open Docker Swarm ports?" "n" && OPEN_SWARM=true || OPEN_SWARM=false ;;
+        5) ask SSH_PORT "SSH port in use" "2222" ;;
+        10) ask DOMAIN "Root domain" "" ;;
+    esac
+
+    echo ""
+    case "$n" in
+        1)  phase_system_update  ;;
+        2)  phase_create_user    ;;
+        3)  phase_ssh_hardening  ;;
+        4)  phase_ufw            ;;
+        5)  phase_fail2ban       ;;
+        6)  phase_kernel_hardening ;;
+        7)  phase_rootkit        ;;
+        8)  phase_auto_updates   ;;
+        9)  phase_docker         ;;
+        10) INSTALL_CAPROVER=true; phase_caprover ;;
+        11) phase_monitoring     ;;
+        12) phase_lynis          ;;
+        13) phase_backup         ;;
+        14) phase_swap           ;;
+    esac
+}
+
+# ─── PHASE: Swap File ────────────────────────────────────────────────────────
+phase_swap() {
+    banner "Phase 14 · Swap File"
+
+    if [[ -n "$(swapon --show)" ]]; then
+        ok "Swap is already enabled — skipping"
+        return 0
+    fi
+
+    local ram_kb
+    ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local ram_mb=$((ram_kb / 1024))
+    local swap_size="2G"
+
+    if [ "$ram_mb" -le 1024 ]; then
+        swap_size="2G"
+    elif [ "$ram_mb" -le 2048 ]; then
+        swap_size="4G"
+    else
+        swap_size="2G"
+    fi
+
+    info "Creating ${swap_size} swap file..."
+    fallocate -l "$swap_size" /swapfile >> "$LOG_FILE" 2>&1 || {
+        warn "fallocate failed, attempting dd..."
+        dd if=/dev/zero of=/swapfile bs=1M count=$(( ${swap_size%G} * 1024 )) >> "$LOG_FILE" 2>&1
+    }
+
+    chmod 600 /swapfile
+    mkswap /swapfile >> "$LOG_FILE" 2>&1
+    swapon /swapfile >> "$LOG_FILE" 2>&1
+
+    if ! grep -q "/swapfile" /etc/fstab; then
+        echo "/swapfile none swap sw 0 0" >> /etc/fstab
+    fi
+
+    # Optimize swappiness
+    sysctl vm.swappiness=10 >> "$LOG_FILE" 2>&1
+    echo "vm.swappiness=10" >> /etc/sysctl.conf
+
+    ok "Swap file (${swap_size}) created and optimized"
+    ok "Phase 14 complete"
+}
+
+# ─── CMD: full wizard run ─────────────────────────────────────────────────────
+cmd_run() {
+    require_root
+    log "forge v${VERSION} started — full run"
+    splash
+    pause
+    phase_menu
+    gather_config
+
+    echo ""
+    echo -e "  ${G}${BOLD}Starting...${RESET}\n"
+
+    has_phase 1  && phase_system_update
+    has_phase 2  && phase_create_user
+    has_phase 3  && phase_ssh_hardening
+    has_phase 4  && phase_ufw
+    has_phase 5  && phase_fail2ban
+    has_phase 6  && phase_kernel_hardening
+    has_phase 7  && phase_rootkit
+    has_phase 8  && phase_auto_updates
+    has_phase 9  && phase_docker
+    has_phase 10 && ${INSTALL_CAPROVER:-false} && phase_caprover
+    has_phase 11 && phase_monitoring
+    has_phase 12 && phase_lynis
+    has_phase 13 && phase_backup
+    has_phase 14 && phase_swap
+
+    print_summary
+    log "forge completed"
+}
+
+# ─── ROUTER ───────────────────────────────────────────────────────────────────
+case "${1:-run}" in
+    run)       cmd_run ;;
+    phase)     shift; cmd_phase "$@" ;;
+    status)    cmd_status ;;
+    logs)      cmd_logs ;;
+    reset)     cmd_reset ;;
+    update)    cmd_update ;;
+    uninstall) cmd_uninstall ;;
+    version|-v|--version) cmd_version ;;
+    help|-h|--help)       cmd_help ;;
+    *)
+        error "Unknown command: ${1}"
+        echo ""
+        cmd_help
+        exit 1
+        ;;
+esac

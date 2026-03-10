@@ -1,0 +1,30 @@
+# <type>(<scope>): <description>
+#
+# Types:
+#   feat     — new feature or phase             → bumps minor version
+#   fix      — bug fix                          → bumps patch version
+#   perf     — performance improvement          → bumps patch version
+#   revert   — undo a previous commit           → bumps patch version
+#   docs     — docs/README/CONTRIBUTING only    → no release
+#   chore    — CI, build, deps, tooling         → no release
+#   refactor — restructure, no behaviour change → no release
+#
+# Scopes (optional, use what fits):
+#   phase1  phase2  phase3  ssh  ufw  fail2ban  docker  caprover
+#   sysctl  lynis   backup  ci   installer      readme
+#
+# Examples:
+#   feat(ssh): add FIDO2 hardware key support
+#   fix(sysctl): prevent duplicate entries on re-run
+#   fix(phase3): validate SSH public key format before applying
+#   chore(ci): add shellcheck workflow
+#   docs: add troubleshooting section to README
+#   feat!: rename --port flag to --ssh-port  ← ! means breaking change
+#
+# Rules:
+#   - Keep subject line under 72 chars
+#   - Use imperative mood: "add" not "added", "fix" not "fixes"
+#   - No capital letter after the colon
+#   - No full stop at the end
+#   - Reference issues in footer: Closes #42
+#
