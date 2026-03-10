@@ -7,10 +7,14 @@
 
 ## Install
 
-### One-liner (from GitHub)
-
+### Stable (Recommended)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/scott-lexium/forge/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/scott-lexium/forge/stable/install.sh | sudo bash
+```
+
+### Canary (Experimental)
+```bash
+curl -fsSL https://raw.githubusercontent.com/scott-lexium/forge/canary/install.sh | sudo bash -- --canary
 ```
 
 ### From a local clone
@@ -40,7 +44,9 @@ sudo forge [command]
 | `sudo forge shell [user]` | Manage user shells (Switch Bash/Zsh) |
 | `sudo forge reset` | Reset server configuration (revert SSH, UFW, users) |
 | `sudo forge logs` | Browse past setup logs |
-| `sudo forge update` | Self-update to the latest version |
+| `sudo forge update` | Update to the latest version in current channel |
+| `sudo forge update --canary` | Switch to the Canary channel |
+| `sudo forge update --stable` | Switch to the Stable channel |
 | `sudo forge uninstall` | Remove forge from the system |
 | `sudo forge version` | Show installed version |
 | `sudo forge help` | Show help |
