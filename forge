@@ -10,7 +10,7 @@ IFS=$'\n\t'
 
 # ─── Meta ─────────────────────────────────────────────────────────────────────
 VERSION="1.0.0"  # x-release-please-version
-CHANNEL="stable"
+CHANNEL="canary"
 TOOL_NAME="forge"
 INSTALL_PATH="/usr/local/bin/${TOOL_NAME}"
 GITHUB_RAW="https://raw.githubusercontent.com/scott-lexium/forge/${CHANNEL}"
