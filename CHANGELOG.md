@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.2.0](https://github.com/scott-lexium/forge/compare/v1.1.0...v1.2.0) (2026-03-10)
+
+
+### Features
+
+* added Phase 15 (Zsh shell customization) and shell management command ([f52029e](https://github.com/scott-lexium/forge/commit/f52029e39db9fade0ffd5306aa5f219106d1d843))
+* added stability channel support (stable/canary) ([567bd52](https://github.com/scott-lexium/forge/commit/567bd5291ced3440e6bf2ce355e414ccd4367ab1))
+
 ## [1.1.0](https://github.com/scott-lexium/forge/compare/v1.0.0...v1.1.0) (2026-03-10)
 
 
