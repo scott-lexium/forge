@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0](https://github.com/scott-lexium/forge/compare/v1.0.0...v1.1.0) (2026-03-10)
+
+
+### Features
+
+* initial release of forge v1.0.0 ([b75f4dc](https://github.com/scott-lexium/forge/commit/b75f4dc638bc1842ad585f1a30caf5d6fe111e11))
+
 ## [1.0.0] - 2026-03-10
 
 ### Features
