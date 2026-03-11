@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  Forge  —  Automated Server Setup & Security Hardening
-#  Version  : 1.0.0
+#  Version  : 1.3.0
 #  Install  : curl -fsSL https://raw.githubusercontent.com/scott-lexium/forge/main/install.sh | sudo bash
 #  Usage    : sudo forge [command]
 # =============================================================================
@@ -9,7 +9,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ─── Meta ─────────────────────────────────────────────────────────────────────
-VERSION="1.2.0"  # x-release-please-version
+VERSION="1.3.0"  # x-release-please-version
 CHANNEL="stable"
 TOOL_NAME="forge"
 INSTALL_PATH="/usr/local/bin/${TOOL_NAME}"
@@ -36,6 +36,8 @@ SSH_PUB_KEY=""
 SERVER_HOSTNAME="vps-server"
 SERVER_TIMEZONE="UTC"
 DOMAIN=""
+WEBHOOK_URL=""
+WEBHOOK_TYPE="slack"
 OPEN_SWARM=false
 INSTALL_DOCKER=false
 INSTALL_CAPROVER=false
@@ -143,9 +145,10 @@ cmd_help() {
     echo ""
     echo -e "  ${W}Commands:${RESET}"
     echo -e "    ${C}run${RESET}          Run the full interactive setup wizard ${D}(default)${RESET}"
-    echo -e "    ${C}phase <n>${RESET}    Run a single phase (1–13) non-interactively"
+    echo -e "    ${C}phase <n>${RESET}    Run a single phase (1-18) non-interactively"
     echo -e "    ${C}status${RESET}       Show current server hardening status"
     echo -e "    ${C}shell${RESET}        Manage user shells (Switch between Bash/Zsh)"
+    echo -e "    ${C}heal${RESET}         Run manual system health check"
     echo -e "    ${C}logs${RESET}         View recent setup logs"
     echo -e "    ${C}reset${RESET}        Reset server configuration (revert SSH, UFW, users)"
     echo -e "    ${C}update${RESET}       Update forge to the latest version"
@@ -169,8 +172,10 @@ cmd_help() {
     echo -e "    ${D}13${RESET}  Config backup"
     echo -e "    ${D}14${RESET}  Swap file creation"
     echo -e "    ${D}15${RESET}  Zsh + Oh-My-Zsh shell"
+    echo -e "    ${D}16${RESET}  Webhook notifications"
+    echo -e "    ${D}17${RESET}  WireGuard VPN Server"
+    echo -e "    ${D}18${RESET}  Automated heal system"
     echo ""
-
     echo -e "  ${W}Examples:${RESET}"
     echo -e "    ${D}sudo forge${RESET}              # interactive wizard"
     echo -e "    ${D}sudo forge run${RESET}          # same as above"
@@ -252,6 +257,8 @@ cmd_status() {
         echo -e "  ${OK} SSH persistent service is in control${RESET}"
     fi
     _check "CapRover container"          "docker ps 2>/dev/null | grep -q caprover"
+    _check "WireGuard VPN active"        "systemctl is-active wg-quick@wg0"
+    _check "Automated Heal active"       "systemctl is-active forge-heal.timer"
     echo ""
 
     echo -e "  ${W}SSH Config${RESET}"
@@ -266,7 +273,7 @@ cmd_status() {
         else
              echo -e "  ${ERR} ${R}Firewall BLOCKS port $sshport${RESET}"
         fi
-        
+
         # Check for port 22 if it's not the configured port
         if [[ "$sshport" != "22" ]] && ufw status | grep -E "^22/tcp\s+ALLOW" >/dev/null; then
             echo -e "  ${Y}⚠  Warning: Port 22 is still open in firewall (should be closed)${RESET}"
@@ -290,7 +297,7 @@ cmd_status() {
 cmd_update() {
     require_root update
     banner "Self-Update"
-    
+
     local target_channel="${CHANNEL}"
     if [[ "${1:-}" == "--canary" ]]; then
         target_channel="canary"
@@ -373,7 +380,7 @@ cmd_reset() {
     if [[ -f "${sshd_conf}.bak" ]]; then
         info "Restoring SSH config from backup..."
         cp "${sshd_conf}.bak" "$sshd_conf"
-        
+
         # Restore ssh.socket if it was masked (common in modern Ubuntu)
         if systemctl list-unit-files | grep -q "^ssh.socket.*masked"; then
             info "Restoring ssh.socket activation..."
@@ -434,6 +441,33 @@ cmd_reset() {
         fi
     fi
 
+    # 8. Remove WireGuard
+    if [[ -d "/etc/wireguard" ]]; then
+        if confirm "Remove WireGuard VPN configuration and keys?" "n"; then
+            info "Stopping and removing WireGuard..."
+            systemctl stop wg-quick@wg0 >> "$LOG_FILE" 2>&1 || true
+            systemctl disable wg-quick@wg0 >> "$LOG_FILE" 2>&1 || true
+            rm -rf /etc/wireguard
+            rm -f /etc/sysctl.d/99-wireguard.conf
+            rm -f /root/wireguard-client.conf
+            ufw delete allow 51820/udp >> "$LOG_FILE" 2>&1 || true
+            ok "WireGuard removed"
+        fi
+    fi
+
+    # 9. Remove Heal System
+    if [[ -f "/usr/local/bin/forge-heal" ]]; then
+        if confirm "Remove automated heal system?" "n"; then
+            info "Disabling heal system..."
+            systemctl stop forge-heal.timer >> "$LOG_FILE" 2>&1 || true
+            systemctl disable forge-heal.timer >> "$LOG_FILE" 2>&1 || true
+            rm -f /etc/systemd/system/forge-heal.*
+            rm -f /usr/local/bin/forge-heal
+            systemctl daemon-reload
+            ok "Heal system removed"
+        fi
+    fi
+
     echo ""
     ok "Reset complete. Server is back to (mostly) default state."
     echo ""
@@ -491,13 +525,17 @@ phase_menu() {
         echo -e "   ${C}[13]${RESET}  Config backup"
         echo -e "   ${C}[14]${RESET}  Swap file creation"
         echo -e "   ${C}[15]${RESET}  Zsh + Oh-My-Zsh Shell"
+        echo -e "   ${C}[16]${RESET}  Webhook Notifications (Slack/Discord/Telegram)"
+        echo -e "   ${C}[17]${RESET}  WireGuard VPN Server"
+        echo -e "   ${C}[18]${RESET}  Automated Heal System (Background Monitoring)"
         echo ""
         echo -e "  ${D}Enter numbers separated by spaces (e.g. 1 2 3 4 5):${RESET}"
         echo -en "  ${C}?${RESET} ${W}Phases${RESET}: "
         read -r -a PHASES_RUN
         else
-        PHASES_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15)
+        PHASES_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18)
         fi
+
     log "Phases selected: ${PHASES_RUN[*]}"
 }
 
@@ -521,6 +559,24 @@ gather_config() {
 
     if has_phase 3; then
         read_ssh_pubkey
+    fi
+
+    if has_phase 16; then
+        ask WEBHOOK_URL "Webhook URL (Slack/Discord/Telegram)" ""
+        if [[ -n "$WEBHOOK_URL" ]]; then
+            echo -e "  ${C}?${RESET} ${W}Select Webhook Type${RESET}:"
+            echo -e "    ${C}[s]${RESET} Slack"
+            echo -e "    ${C}[d]${RESET} Discord"
+            echo -e "    ${C}[t]${RESET} Telegram"
+            echo -en "  ${C}?${RESET} ${W}Your choice${RESET} [${G}s${RESET}/d/t]: "
+            read -r type
+            case "${type,,}" in
+                d*) WEBHOOK_TYPE="discord" ;;
+                t*) WEBHOOK_TYPE="telegram" ;;
+                *)  WEBHOOK_TYPE="slack" ;;
+            esac
+        fi
+        echo ""
     fi
 
     if has_phase 1; then
@@ -707,7 +763,7 @@ SSHEOF
         warn "Reverting SSH config..."
         if [[ -f "${sshd_conf}.bak" ]]; then
             cp "${sshd_conf}.bak" "$sshd_conf"
-            
+
             # If we masked ssh.socket, unmask it on revert
             if systemctl list-unit-files | grep -q "^ssh.socket.*masked"; then
                 systemctl unmask ssh.socket >> "$LOG_FILE" 2>&1 || true
@@ -717,7 +773,7 @@ SSHEOF
             else
                 systemctl restart ssh
             fi
-            
+
             SSH_PORT="$original_port"
             ok "Original sshd_config restored (Port ${SSH_PORT})"
         else
@@ -991,8 +1047,8 @@ print_summary() {
 cmd_phase() {
     require_root
     local n="${1:-}"
-    if [[ -z "$n" ]] || ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < 1 || n > 13 )); then
-        error "Usage: sudo forge phase <1-13>"
+    if [[ -z "$n" ]] || ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < 1 || n > 18 )); then
+        error "Usage: sudo forge phase <1-18>"
         echo ""
         cmd_help
         exit 1
@@ -1016,11 +1072,25 @@ cmd_phase() {
     esac
 
     echo ""
+    case "$n" in
+        1)  phase_system_update  ;;
+        2)  phase_create_user    ;;
+        3)  phase_ssh_hardening  ;;
+        4)  phase_ufw            ;;
+        5)  phase_fail2ban       ;;
+        6)  phase_kernel_hardening ;;
+        7)  phase_rootkit        ;;
+        8)  phase_auto_updates   ;;
+        9)  phase_docker         ;;
+        10) phase_caprover       ;;
         11) phase_monitoring     ;;
         12) phase_lynis          ;;
         13) phase_backup         ;;
         14) phase_swap           ;;
         15) phase_zsh            ;;
+        16) phase_notifications  ;;
+        17) phase_wireguard      ;;
+        18) phase_heal           ;;
     esac
 }
 
@@ -1072,14 +1142,14 @@ phase_swap() {
 phase_zsh() {
     banner "Phase 15 · Developer Experience (Zsh)"
     local target_user="${ADMIN_USER:-deploy}"
-    
+
     if ! id "$target_user" &>/dev/null; then
         warn "User '${target_user}' does not exist. Configuring for current user."
         target_user=$(whoami)
     fi
 
     DEBIAN_FRONTEND=noninteractive run apt-get install -y zsh curl git
-    
+
     info "Configuring Zsh for ${target_user}..."
     local user_home
     user_home=$(eval echo "~$target_user")
@@ -1093,7 +1163,7 @@ phase_zsh() {
     # Install plugins
     local plugin_dir="${user_home}/.oh-my-zsh/custom/plugins"
     mkdir -p "$plugin_dir"
-    
+
     if [[ ! -d "${plugin_dir}/zsh-autosuggestions" ]]; then
         sudo -u "$target_user" git clone https://github.com/zsh-users/zsh-autosuggestions "$plugin_dir/zsh-autosuggestions" >> "$LOG_FILE" 2>&1
     fi
@@ -1103,10 +1173,10 @@ phase_zsh() {
 
     # Update .zshrc
     sudo -u "$target_user" sed -i 's/plugins=(git)/plugins=(git zsh-autosuggestions zsh-syntax-highlighting)/' "${user_home}/.zshrc"
-    
+
     # Change shell
     chsh -s "$(which zsh)" "$target_user" >> "$LOG_FILE" 2>&1
-    
+
     ok "Zsh with Oh-My-Zsh & plugins configured for ${target_user}"
     ok "Phase 15 complete"
 }
@@ -1115,7 +1185,7 @@ phase_zsh() {
 cmd_shell() {
     require_root shell
     local target_user="${1:-deploy}"
-    
+
     if ! id "$target_user" &>/dev/null; then
         error "User '${target_user}' not found."
         echo -e "  ${D}Usage: sudo forge shell [username]${RESET}"
@@ -1125,7 +1195,7 @@ cmd_shell() {
     banner "Shell Configuration: ${target_user}"
     echo -e "  ${D}Current shell:${RESET} ${W}$(getent passwd "$target_user" | cut -d: -f7)${RESET}"
     echo ""
-    
+
     echo -e "  ${C}[b]${RESET} Switch to Bash"
     echo -e "  ${C}[z]${RESET} Switch to Zsh"
     echo -e "  ${C}[o]${RESET} Install/Update Oh-My-Zsh & Plugins"
@@ -1134,16 +1204,215 @@ cmd_shell() {
     read -r choice
 
     case "$choice" in
-        [Bb]*) 
+        [Bb]*)
             chsh -s "$(which bash)" "$target_user" && ok "Shell changed to Bash for ${target_user}" ;;
-        [Zz]*) 
+        [Zz]*)
             apt-get install -y zsh &>/dev/null
             chsh -s "$(which zsh)" "$target_user" && ok "Shell changed to Zsh for ${target_user}" ;;
-        [Oo]*) 
+        [Oo]*)
             ADMIN_USER="$target_user" phase_zsh ;;
-        *) 
+        *)
             echo -e "  ${D}Cancelled.${RESET}" ;;
     esac
+}
+
+# ─── PHASE: Webhook Notifications ──────────────────────────────────────────
+send_notification() {
+    local message="$1"
+    [[ -z "$WEBHOOK_URL" ]] && return 0
+
+    local payload=""
+    case "$WEBHOOK_TYPE" in
+        slack)   payload="{\"text\": \"${message}\"}" ;;
+        discord) payload="{\"content\": \"${message}\"}" ;;
+        telegram)
+            # Telegram format: URL should be https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>
+            curl -s -X POST "$WEBHOOK_URL" -d "text=${message}" >> "$LOG_FILE" 2>&1
+            return 0
+            ;;
+    esac
+
+    curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK_URL" >> "$LOG_FILE" 2>&1
+}
+
+phase_notifications() {
+    banner "Phase 16 · Webhook Notifications"
+
+    if [[ -z "$WEBHOOK_URL" ]]; then
+        warn "Webhook URL not configured — skipping"
+        return 0
+    fi
+
+    # Save to config if not present
+    mkdir -p "$CONFIG_DIR"
+    echo "WEBHOOK_URL=\"$WEBHOOK_URL\"" > "${CONFIG_DIR}/notifications.conf"
+    echo "WEBHOOK_TYPE=\"$WEBHOOK_TYPE\"" >> "${CONFIG_DIR}/notifications.conf"
+
+    send_notification "🔔 *Forge v${VERSION}*: Notifications enabled for *$(hostname)*"
+    ok "Notifications enabled and test sent (${WEBHOOK_TYPE})"
+    ok "Phase 16 complete"
+}
+
+# ─── PHASE: WireGuard VPN ─────────────────────────────────────────────────────
+phase_wireguard() {
+    banner "Phase 17 · WireGuard VPN"
+
+    DEBIAN_FRONTEND=noninteractive run apt-get install -y wireguard qrencode iptables
+
+    local wg_dir="/etc/wireguard"
+    mkdir -p "$wg_dir" && chmod 700 "$wg_dir"
+
+    info "Generating keys..."
+    local server_priv server_pub client_priv client_pub
+    server_priv=$(wg genkey)
+    server_pub=$(echo "$server_priv" | wg pubkey)
+    client_priv=$(wg genkey)
+    client_pub=$(echo "$client_priv" | wg pubkey)
+
+    local public_ip
+    public_ip=$(hostname -I | awk '{print $1}')
+    local eth_int
+    eth_int=$(ip route get 8.8.8.8 | grep -Po '(?<=dev )(\S+)')
+
+    info "Configuring server (wg0)..."
+    cat > "${wg_dir}/wg0.conf" <<WGOEOF
+[Interface]
+PrivateKey = ${server_priv}
+Address = 10.0.0.1/24
+ListenPort = 51820
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${eth_int} -j MASQUERADE
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o ${eth_int} -j MASQUERADE
+
+[Peer]
+PublicKey = ${client_pub}
+AllowedIPs = 10.0.0.2/32
+WGOEOF
+
+    # Enable IP forwarding
+    echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-wireguard.conf
+    sysctl -p /etc/sysctl.d/99-wireguard.conf >> "$LOG_FILE" 2>&1
+
+    # UFW integration
+    if command -v ufw &>/dev/null; then
+        ufw allow 51820/udp comment "WireGuard" >> "$LOG_FILE" 2>&1
+    fi
+
+    systemctl enable wg-quick@wg0 >> "$LOG_FILE" 2>&1
+    systemctl start wg-quick@wg0 >> "$LOG_FILE" 2>&1
+
+    # Generate client config
+    cat > "/root/wireguard-client.conf" <<WGOEOF
+[Interface]
+PrivateKey = ${client_priv}
+Address = 10.0.0.2/24
+DNS = 1.1.1.1, 8.8.8.8
+
+[Peer]
+PublicKey = ${server_pub}
+Endpoint = ${public_ip}:51820
+AllowedIPs = 0.0.0.0/0
+PersistentKeepalive = 25
+WGOEOF
+
+    ok "WireGuard server running on port 51820"
+    echo ""
+    echo -e "  ${G}${BOLD}CLIENT CONFIG GENERATED!${RESET}"
+    echo -e "  ${D}Saved to:${RESET} ${W}/root/wireguard-client.conf${RESET}"
+    echo ""
+    echo -e "  ${W}Scan this with your WireGuard mobile app:${RESET}"
+    echo ""
+    qrencode -t ansiutf8 < "/root/wireguard-client.conf"
+    echo ""
+
+    ok "Phase 17 complete"
+}
+
+# ─── PHASE: Automated Heal ────────────────────────────────────────────────────
+phase_heal() {
+    banner "Phase 18 · Automated Heal System"
+
+    local heal_script="/usr/local/bin/forge-heal"
+    info "Installing heal engine to ${heal_script}..."
+
+    cat > "$heal_script" <<'HEALEOF'
+#!/usr/bin/env bash
+# Forge Automated Heal Engine
+LOG_FILE="/var/log/forge/heal.log"
+CONFIG="/etc/forge/notifications.conf"
+
+notify() {
+    [[ -f "$CONFIG" ]] && source "$CONFIG"
+    [[ -z "${WEBHOOK_URL:-}" ]] && return 0
+    local msg="🛠 *Forge Heal*: $1"
+    case "${WEBHOOK_TYPE:-slack}" in
+        slack)   curl -s -X POST -H 'Content-type: application/json' --data "{\"text\": \"$msg\"}" "$WEBHOOK_URL" >/dev/null ;;
+        discord) curl -s -X POST -H 'Content-type: application/json' --data "{\"content\": \"$msg\"}" "$WEBHOOK_URL" >/dev/null ;;
+        telegram) curl -s -X POST "$WEBHOOK_URL" -d "text=$msg" >/dev/null ;;
+    esac
+}
+
+check_service() {
+    local svc=$1
+    if ! systemctl is-active --quiet "$svc"; then
+        echo "$(date) - $svc is down. Restarting..." >> "$LOG_FILE"
+        systemctl restart "$svc"
+        notify "Restarted failing service: *$svc* on *$(hostname)*"
+    fi
+}
+
+# Core Services
+check_service ssh
+command -v docker &>/dev/null && check_service docker
+systemctl list-unit-files | grep -q "wg-quick@wg0" && check_service wg-quick@wg0
+
+# CapRover
+if docker ps 2>/dev/null | grep -q caprover; then
+    if ! curl -s --max-time 10 http://localhost:3000 >/dev/null; then
+        echo "$(date) - CapRover API unresponsive. Restarting container..." >> "$LOG_FILE"
+        docker restart caprover >/dev/null
+        notify "Restarted unresponsive *CapRover* container on *$(hostname)*"
+    fi
+fi
+HEALEOF
+
+    chmod +x "$heal_script"
+
+    info "Setting up systemd timer (every 5 mins)..."
+    cat > /etc/systemd/system/forge-heal.service <<SEEOF
+[Unit]
+Description=Forge Automated Heal Service
+
+[Service]
+Type=oneshot
+ExecStart=${heal_script}
+SEEOF
+
+    cat > /etc/systemd/system/forge-heal.timer <<TEEOF
+[Unit]
+Description=Run Forge Heal every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+TEEOF
+
+    systemctl daemon-reload
+    systemctl enable --now forge-heal.timer >> "$LOG_FILE" 2>&1
+
+    ok "Heal system active (background monitoring every 5m)"
+    ok "Phase 18 complete"
+}
+
+# ─── CMD: Heal ────────────────────────────────────────────────────────────────
+cmd_heal() {
+    require_root heal
+    banner "Manual System Health Check"
+    info "Running heal engine..."
+    /usr/local/bin/forge-heal
+    ok "Health check completed. Check /var/log/forge/heal.log for details."
 }
 
 # ─── CMD: full wizard run ─────────────────────────────────────────────────────
@@ -1157,6 +1426,11 @@ cmd_run() {
 
     echo ""
     echo -e "  ${G}${BOLD}Starting...${RESET}\n"
+
+    # Send start notification if configured
+    if [[ -n "$WEBHOOK_URL" ]]; then
+        send_notification "🚀 *Forge*: Starting setup on *$(hostname)*"
+    fi
 
     has_phase 1  && phase_system_update
     has_phase 2  && phase_create_user
@@ -1173,8 +1447,15 @@ cmd_run() {
     has_phase 13 && phase_backup
     has_phase 14 && phase_swap
     has_phase 15 && phase_zsh
+    has_phase 16 && phase_notifications
+    has_phase 17 && phase_wireguard
+    has_phase 18 && phase_heal
 
     print_summary
+
+    if [[ -n "$WEBHOOK_URL" ]]; then
+        send_notification "✅ *Forge*: Setup completed successfully on *$(hostname)*"
+    fi
     log "forge completed"
 }
 
