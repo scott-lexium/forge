@@ -2,12 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.1.0](https://github.com/scott-lexium/forge/compare/v1.0.0...v1.1.0) (2026-03-10)
+## [1.1.0-canary] - 2026-03-10
 
+### Features (Canary Only)
 
-### Features
+- **Phase 16: Webhook Notifications**: Real-time alerts for Slack, Discord, and Telegram.
+- **Phase 17: WireGuard VPN**: Automated setup of a secure VPN server with mobile-ready QR codes.
+- **Phase 18: Automated Heal System**: Background monitoring and auto-restart for failed services.
+- **Manual Heal Command**: `sudo forge heal` to trigger a system health check.
+- **Stability Channels**: Support for `stable` and `canary` tracks.
 
-* initial release of forge v1.0.0 ([b75f4dc](https://github.com/scott-lexium/forge/commit/b75f4dc638bc1842ad585f1a30caf5d6fe111e11))
+### Improvements & Fixes
+
+- **Phase 15**: Zsh + Oh-My-Zsh shell customization.
+- **Phase 14**: Automated Swap file creation.
+- **SSH Hardening**: Added support for `ssh.socket` masking on modern Ubuntu.
+- **Reset Command**: Robust system restoration and user removal.
+- **Status Command**: Detailed reporting for SSH, UFW, Swap, VPN, and Heal system.
 
 ## [1.0.0] - 2026-03-10
 
@@ -24,5 +35,3 @@ All notable changes to this project will be documented in this file.
 - System Monitoring Tools
 - Security Auditing with Lynis
 - Server Status Reporting
-- **New: Phase 14 - Automated Swap File Creation**
-- **New: Reset Command to Restore Original Configuration**
