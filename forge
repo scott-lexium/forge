@@ -9,7 +9,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ─── Meta ─────────────────────────────────────────────────────────────────────
-VERSION="1.0.0"  # x-release-please-version
+VERSION="1.1.0-canary"  # x-release-please-version
 CHANNEL="canary"
 TOOL_NAME="forge"
 INSTALL_PATH="/usr/local/bin/${TOOL_NAME}"
@@ -148,6 +148,7 @@ cmd_help() {
     echo -e "    ${C}phase <n>${RESET}    Run a single phase (1–13) non-interactively"
     echo -e "    ${C}status${RESET}       Show current server hardening status"
     echo -e "    ${C}shell${RESET}        Manage user shells (Switch between Bash/Zsh)"
+    echo -e "    ${C}heal${RESET}         Run manual system health check"
     echo -e "    ${C}logs${RESET}         View recent setup logs"
     echo -e "    ${C}reset${RESET}        Reset server configuration (revert SSH, UFW, users)"
     echo -e "    ${C}update${RESET}       Update forge to the latest version"
@@ -173,6 +174,7 @@ cmd_help() {
     echo -e "    ${D}15${RESET}  Zsh + Oh-My-Zsh shell"
     echo -e "    ${D}16${RESET}  Webhook notifications"
     echo -e "    ${D}17${RESET}  WireGuard VPN Server"
+    echo -e "    ${D}18${RESET}  Automated heal system"
     echo ""
     }
     echo -e "  ${W}Examples:${RESET}"
@@ -257,6 +259,7 @@ cmd_status() {
     fi
     _check "CapRover container"          "docker ps 2>/dev/null | grep -q caprover"
     _check "WireGuard VPN active"        "systemctl is-active wg-quick@wg0"
+    _check "Automated Heal active"       "systemctl is-active forge-heal.timer"
     echo ""
 
     echo -e "  ${W}SSH Config${RESET}"
@@ -453,6 +456,19 @@ cmd_reset() {
         fi
     fi
 
+    # 9. Remove Heal System
+    if [[ -f "/usr/local/bin/forge-heal" ]]; then
+        if confirm "Remove automated heal system?" "n"; then
+            info "Disabling heal system..."
+            systemctl stop forge-heal.timer >> "$LOG_FILE" 2>&1 || true
+            systemctl disable forge-heal.timer >> "$LOG_FILE" 2>&1 || true
+            rm -f /etc/systemd/system/forge-heal.*
+            rm -f /usr/local/bin/forge-heal
+            systemctl daemon-reload
+            ok "Heal system removed"
+        fi
+    fi
+
     echo ""
     ok "Reset complete. Server is back to (mostly) default state."
     echo ""
@@ -512,13 +528,15 @@ phase_menu() {
         echo -e "   ${C}[15]${RESET}  Zsh + Oh-My-Zsh Shell"
         echo -e "   ${C}[16]${RESET}  Webhook Notifications (Slack/Discord/Telegram)"
         echo -e "   ${C}[17]${RESET}  WireGuard VPN Server"
+        echo -e "   ${C}[18]${RESET}  Automated Heal System (Background Monitoring)"
         echo ""
         echo -e "  ${D}Enter numbers separated by spaces (e.g. 1 2 3 4 5):${RESET}"
         echo -en "  ${C}?${RESET} ${W}Phases${RESET}: "
         read -r -a PHASES_RUN
         else
-        PHASES_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
+        PHASES_RUN=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18)
         fi
+
     log "Phases selected: ${PHASES_RUN[*]}"
 }
 
@@ -1062,6 +1080,7 @@ cmd_phase() {
         15) phase_zsh            ;;
         16) phase_notifications  ;;
         17) phase_wireguard      ;;
+        18) phase_heal           ;;
     esac
 }
 
@@ -1298,6 +1317,94 @@ WGOEOF
     ok "Phase 17 complete"
 }
 
+# ─── PHASE: Automated Heal ────────────────────────────────────────────────────
+phase_heal() {
+    banner "Phase 18 · Automated Heal System"
+    
+    local heal_script="/usr/local/bin/forge-heal"
+    info "Installing heal engine to ${heal_script}..."
+    
+    cat > "$heal_script" <<'HEALEOF'
+#!/usr/bin/env bash
+# Forge Automated Heal Engine
+LOG_FILE="/var/log/forge/heal.log"
+CONFIG="/etc/forge/notifications.conf"
+
+notify() {
+    [[ -f "$CONFIG" ]] && source "$CONFIG"
+    [[ -z "${WEBHOOK_URL:-}" ]] && return 0
+    local msg="🛠 *Forge Heal*: $1"
+    case "${WEBHOOK_TYPE:-slack}" in
+        slack)   curl -s -X POST -H 'Content-type: application/json' --data "{\"text\": \"$msg\"}" "$WEBHOOK_URL" >/dev/null ;;
+        discord) curl -s -X POST -H 'Content-type: application/json' --data "{\"content\": \"$msg\"}" "$WEBHOOK_URL" >/dev/null ;;
+        telegram) curl -s -X POST "$WEBHOOK_URL" -d "text=$msg" >/dev/null ;;
+    esac
+}
+
+check_service() {
+    local svc=$1
+    if ! systemctl is-active --quiet "$svc"; then
+        echo "$(date) - $svc is down. Restarting..." >> "$LOG_FILE"
+        systemctl restart "$svc"
+        notify "Restarted failing service: *$svc* on *$(hostname)*"
+    fi
+}
+
+# Core Services
+check_service ssh
+command -v docker &>/dev/null && check_service docker
+systemctl list-unit-files | grep -q "wg-quick@wg0" && check_service wg-quick@wg0
+
+# CapRover
+if docker ps 2>/dev/null | grep -q caprover; then
+    if ! curl -s --max-time 10 http://localhost:3000 >/dev/null; then
+        echo "$(date) - CapRover API unresponsive. Restarting container..." >> "$LOG_FILE"
+        docker restart caprover >/dev/null
+        notify "Restarted unresponsive *CapRover* container on *$(hostname)*"
+    fi
+fi
+HEALEOF
+
+    chmod +x "$heal_script"
+
+    info "Setting up systemd timer (every 5 mins)..."
+    cat > /etc/systemd/system/forge-heal.service <<SEEOF
+[Unit]
+Description=Forge Automated Heal Service
+
+[Service]
+Type=oneshot
+ExecStart=${heal_script}
+SEEOF
+
+    cat > /etc/systemd/system/forge-heal.timer <<TEEOF
+[Unit]
+Description=Run Forge Heal every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+TEEOF
+
+    systemctl daemon-reload
+    systemctl enable --now forge-heal.timer >> "$LOG_FILE" 2>&1
+    
+    ok "Heal system active (background monitoring every 5m)"
+    ok "Phase 18 complete"
+}
+
+# ─── CMD: Heal ────────────────────────────────────────────────────────────────
+cmd_heal() {
+    require_root heal
+    banner "Manual System Health Check"
+    info "Running heal engine..."
+    /usr/local/bin/forge-heal
+    ok "Health check completed. Check /var/log/forge/heal.log for details."
+}
+
 # ─── CMD: full wizard run ─────────────────────────────────────────────────────
 cmd_run() {
     require_root
@@ -1332,6 +1439,7 @@ cmd_run() {
     has_phase 15 && phase_zsh
     has_phase 16 && phase_notifications
     has_phase 17 && phase_wireguard
+    has_phase 18 && phase_heal
 
     print_summary
     

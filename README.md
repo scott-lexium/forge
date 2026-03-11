@@ -39,9 +39,10 @@ sudo forge [command]
 |---|---|
 | `sudo forge` | Run the full interactive wizard *(default)* |
 | `sudo forge run` | Same as above |
-| `sudo forge phase <1-17>` | Run a single phase only |
+| `sudo forge phase <1-18>` | Run a single phase only |
 | `sudo forge status` | Show live hardening status of the server |
 | `sudo forge shell [user]` | Manage user shells (Switch Bash/Zsh) |
+| `sudo forge heal` | Run manual system health check |
 | `sudo forge reset` | Reset server configuration (revert SSH, UFW, users) |
 | `sudo forge logs` | Browse past setup logs |
 | `sudo forge update` | Update to the latest version in current channel |
@@ -74,6 +75,7 @@ sudo forge [command]
 | 15 | Zsh Shell | Zsh + Oh-My-Zsh + Plugins (autosuggestions, syntax highlighting) |
 | 16 | Notifications | Webhook alerts for Slack, Discord, and Telegram |
 | 17 | WireGuard VPN | Secure VPN server with automatic client config & QR codes |
+| 18 | Automated Heal | Background monitoring and auto-restart for failed services |
 
 ---
 
