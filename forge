@@ -145,7 +145,7 @@ cmd_help() {
     echo ""
     echo -e "  ${W}Commands:${RESET}"
     echo -e "    ${C}run${RESET}          Run the full interactive setup wizard ${D}(default)${RESET}"
-    echo -e "    ${C}phase <n>${RESET}    Run a single phase (1–13) non-interactively"
+    echo -e "    ${C}phase <n>${RESET}    Run a single phase (1-18) non-interactively"
     echo -e "    ${C}status${RESET}       Show current server hardening status"
     echo -e "    ${C}shell${RESET}        Manage user shells (Switch between Bash/Zsh)"
     echo -e "    ${C}heal${RESET}         Run manual system health check"
@@ -176,7 +176,6 @@ cmd_help() {
     echo -e "    ${D}17${RESET}  WireGuard VPN Server"
     echo -e "    ${D}18${RESET}  Automated heal system"
     echo ""
-    }
     echo -e "  ${W}Examples:${RESET}"
     echo -e "    ${D}sudo forge${RESET}              # interactive wizard"
     echo -e "    ${D}sudo forge run${RESET}          # same as above"
@@ -274,7 +273,7 @@ cmd_status() {
         else
              echo -e "  ${ERR} ${R}Firewall BLOCKS port $sshport${RESET}"
         fi
-        
+
         # Check for port 22 if it's not the configured port
         if [[ "$sshport" != "22" ]] && ufw status | grep -E "^22/tcp\s+ALLOW" >/dev/null; then
             echo -e "  ${Y}⚠  Warning: Port 22 is still open in firewall (should be closed)${RESET}"
@@ -298,7 +297,7 @@ cmd_status() {
 cmd_update() {
     require_root update
     banner "Self-Update"
-    
+
     local target_channel="${CHANNEL}"
     if [[ "${1:-}" == "--canary" ]]; then
         target_channel="canary"
@@ -381,7 +380,7 @@ cmd_reset() {
     if [[ -f "${sshd_conf}.bak" ]]; then
         info "Restoring SSH config from backup..."
         cp "${sshd_conf}.bak" "$sshd_conf"
-        
+
         # Restore ssh.socket if it was masked (common in modern Ubuntu)
         if systemctl list-unit-files | grep -q "^ssh.socket.*masked"; then
             info "Restoring ssh.socket activation..."
@@ -764,7 +763,7 @@ SSHEOF
         warn "Reverting SSH config..."
         if [[ -f "${sshd_conf}.bak" ]]; then
             cp "${sshd_conf}.bak" "$sshd_conf"
-            
+
             # If we masked ssh.socket, unmask it on revert
             if systemctl list-unit-files | grep -q "^ssh.socket.*masked"; then
                 systemctl unmask ssh.socket >> "$LOG_FILE" 2>&1 || true
@@ -774,7 +773,7 @@ SSHEOF
             else
                 systemctl restart ssh
             fi
-            
+
             SSH_PORT="$original_port"
             ok "Original sshd_config restored (Port ${SSH_PORT})"
         else
@@ -1048,8 +1047,8 @@ print_summary() {
 cmd_phase() {
     require_root
     local n="${1:-}"
-    if [[ -z "$n" ]] || ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < 1 || n > 13 )); then
-        error "Usage: sudo forge phase <1-13>"
+    if [[ -z "$n" ]] || ! [[ "$n" =~ ^[0-9]+$ ]] || (( n < 1 || n > 18 )); then
+        error "Usage: sudo forge phase <1-18>"
         echo ""
         cmd_help
         exit 1
@@ -1073,6 +1072,17 @@ cmd_phase() {
     esac
 
     echo ""
+    case "$n" in
+        1)  phase_system_update  ;;
+        2)  phase_create_user    ;;
+        3)  phase_ssh_hardening  ;;
+        4)  phase_ufw            ;;
+        5)  phase_fail2ban       ;;
+        6)  phase_kernel_hardening ;;
+        7)  phase_rootkit        ;;
+        8)  phase_auto_updates   ;;
+        9)  phase_docker         ;;
+        10) phase_caprover       ;;
         11) phase_monitoring     ;;
         12) phase_lynis          ;;
         13) phase_backup         ;;
@@ -1132,14 +1142,14 @@ phase_swap() {
 phase_zsh() {
     banner "Phase 15 · Developer Experience (Zsh)"
     local target_user="${ADMIN_USER:-deploy}"
-    
+
     if ! id "$target_user" &>/dev/null; then
         warn "User '${target_user}' does not exist. Configuring for current user."
         target_user=$(whoami)
     fi
 
     DEBIAN_FRONTEND=noninteractive run apt-get install -y zsh curl git
-    
+
     info "Configuring Zsh for ${target_user}..."
     local user_home
     user_home=$(eval echo "~$target_user")
@@ -1153,7 +1163,7 @@ phase_zsh() {
     # Install plugins
     local plugin_dir="${user_home}/.oh-my-zsh/custom/plugins"
     mkdir -p "$plugin_dir"
-    
+
     if [[ ! -d "${plugin_dir}/zsh-autosuggestions" ]]; then
         sudo -u "$target_user" git clone https://github.com/zsh-users/zsh-autosuggestions "$plugin_dir/zsh-autosuggestions" >> "$LOG_FILE" 2>&1
     fi
@@ -1163,10 +1173,10 @@ phase_zsh() {
 
     # Update .zshrc
     sudo -u "$target_user" sed -i 's/plugins=(git)/plugins=(git zsh-autosuggestions zsh-syntax-highlighting)/' "${user_home}/.zshrc"
-    
+
     # Change shell
     chsh -s "$(which zsh)" "$target_user" >> "$LOG_FILE" 2>&1
-    
+
     ok "Zsh with Oh-My-Zsh & plugins configured for ${target_user}"
     ok "Phase 15 complete"
 }
@@ -1175,7 +1185,7 @@ phase_zsh() {
 cmd_shell() {
     require_root shell
     local target_user="${1:-deploy}"
-    
+
     if ! id "$target_user" &>/dev/null; then
         error "User '${target_user}' not found."
         echo -e "  ${D}Usage: sudo forge shell [username]${RESET}"
@@ -1185,7 +1195,7 @@ cmd_shell() {
     banner "Shell Configuration: ${target_user}"
     echo -e "  ${D}Current shell:${RESET} ${W}$(getent passwd "$target_user" | cut -d: -f7)${RESET}"
     echo ""
-    
+
     echo -e "  ${C}[b]${RESET} Switch to Bash"
     echo -e "  ${C}[z]${RESET} Switch to Zsh"
     echo -e "  ${C}[o]${RESET} Install/Update Oh-My-Zsh & Plugins"
@@ -1194,14 +1204,14 @@ cmd_shell() {
     read -r choice
 
     case "$choice" in
-        [Bb]*) 
+        [Bb]*)
             chsh -s "$(which bash)" "$target_user" && ok "Shell changed to Bash for ${target_user}" ;;
-        [Zz]*) 
+        [Zz]*)
             apt-get install -y zsh &>/dev/null
             chsh -s "$(which zsh)" "$target_user" && ok "Shell changed to Zsh for ${target_user}" ;;
-        [Oo]*) 
+        [Oo]*)
             ADMIN_USER="$target_user" phase_zsh ;;
-        *) 
+        *)
             echo -e "  ${D}Cancelled.${RESET}" ;;
     esac
 }
@@ -1210,24 +1220,24 @@ cmd_shell() {
 send_notification() {
     local message="$1"
     [[ -z "$WEBHOOK_URL" ]] && return 0
-    
+
     local payload=""
     case "$WEBHOOK_TYPE" in
         slack)   payload="{\"text\": \"${message}\"}" ;;
         discord) payload="{\"content\": \"${message}\"}" ;;
-        telegram) 
+        telegram)
             # Telegram format: URL should be https://api.telegram.org/bot<token>/sendMessage?chat_id=<id>
             curl -s -X POST "$WEBHOOK_URL" -d "text=${message}" >> "$LOG_FILE" 2>&1
             return 0
             ;;
     esac
-    
+
     curl -s -X POST -H 'Content-type: application/json' --data "$payload" "$WEBHOOK_URL" >> "$LOG_FILE" 2>&1
 }
 
 phase_notifications() {
     banner "Phase 16 · Webhook Notifications"
-    
+
     if [[ -z "$WEBHOOK_URL" ]]; then
         warn "Webhook URL not configured — skipping"
         return 0
@@ -1237,7 +1247,7 @@ phase_notifications() {
     mkdir -p "$CONFIG_DIR"
     echo "WEBHOOK_URL=\"$WEBHOOK_URL\"" > "${CONFIG_DIR}/notifications.conf"
     echo "WEBHOOK_TYPE=\"$WEBHOOK_TYPE\"" >> "${CONFIG_DIR}/notifications.conf"
-    
+
     send_notification "🔔 *Forge v${VERSION}*: Notifications enabled for *$(hostname)*"
     ok "Notifications enabled and test sent (${WEBHOOK_TYPE})"
     ok "Phase 16 complete"
@@ -1246,19 +1256,19 @@ phase_notifications() {
 # ─── PHASE: WireGuard VPN ─────────────────────────────────────────────────────
 phase_wireguard() {
     banner "Phase 17 · WireGuard VPN"
-    
+
     DEBIAN_FRONTEND=noninteractive run apt-get install -y wireguard qrencode iptables
-    
+
     local wg_dir="/etc/wireguard"
     mkdir -p "$wg_dir" && chmod 700 "$wg_dir"
-    
+
     info "Generating keys..."
     local server_priv server_pub client_priv client_pub
     server_priv=$(wg genkey)
     server_pub=$(echo "$server_priv" | wg pubkey)
     client_priv=$(wg genkey)
     client_pub=$(echo "$client_priv" | wg pubkey)
-    
+
     local public_ip
     public_ip=$(hostname -I | awk '{print $1}')
     local eth_int
@@ -1313,17 +1323,17 @@ WGOEOF
     echo ""
     qrencode -t ansiutf8 < "/root/wireguard-client.conf"
     echo ""
-    
+
     ok "Phase 17 complete"
 }
 
 # ─── PHASE: Automated Heal ────────────────────────────────────────────────────
 phase_heal() {
     banner "Phase 18 · Automated Heal System"
-    
+
     local heal_script="/usr/local/bin/forge-heal"
     info "Installing heal engine to ${heal_script}..."
-    
+
     cat > "$heal_script" <<'HEALEOF'
 #!/usr/bin/env bash
 # Forge Automated Heal Engine
@@ -1391,7 +1401,7 @@ TEEOF
 
     systemctl daemon-reload
     systemctl enable --now forge-heal.timer >> "$LOG_FILE" 2>&1
-    
+
     ok "Heal system active (background monitoring every 5m)"
     ok "Phase 18 complete"
 }
@@ -1442,7 +1452,7 @@ cmd_run() {
     has_phase 18 && phase_heal
 
     print_summary
-    
+
     if [[ -n "$WEBHOOK_URL" ]]; then
         send_notification "✅ *Forge*: Setup completed successfully on *$(hostname)*"
     fi
