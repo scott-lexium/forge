@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 #  Forge  —  Automated Server Setup & Security Hardening
-#  Version  : 1.0.0
+#  Version  : 1.1.0
 #  Install  : curl -fsSL https://raw.githubusercontent.com/scott-lexium/forge/main/install.sh | sudo bash
 #  Usage    : sudo forge [command]
 # =============================================================================
@@ -9,8 +9,8 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ─── Meta ─────────────────────────────────────────────────────────────────────
-VERSION="1.1.0-canary"  # x-release-please-version
-CHANNEL="canary"
+VERSION="1.1.0"  # x-release-please-version
+CHANNEL="stable"
 TOOL_NAME="forge"
 INSTALL_PATH="/usr/local/bin/${TOOL_NAME}"
 GITHUB_RAW="https://raw.githubusercontent.com/scott-lexium/forge/${CHANNEL}"
