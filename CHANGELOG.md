@@ -2,23 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.1.0] - 2026-03-11
+## [1.2.0](https://github.com/scott-lexium/forge/compare/v1.1.0...v1.2.0) (2026-03-10)
+
 
 ### Features
 
-- **Phase 16: Webhook Notifications**: Real-time alerts for Slack, Discord, and Telegram.
-- **Phase 17: WireGuard VPN**: Automated setup of a secure VPN server with mobile-ready QR codes.
-- **Phase 18: Automated Heal System**: Background monitoring and auto-restart for failed services.
-- **Manual Heal Command**: `sudo forge heal` to trigger a system health check.
-- **Stability Channels**: Support for `stable` and `canary` tracks.
+* added Phase 15 (Zsh shell customization) and shell management command ([f52029e](https://github.com/scott-lexium/forge/commit/f52029e39db9fade0ffd5306aa5f219106d1d843))
+* added stability channel support (stable/canary) ([567bd52](https://github.com/scott-lexium/forge/commit/567bd5291ced3440e6bf2ce355e414ccd4367ab1))
 
-### Improvements & Fixes
+## [1.1.0](https://github.com/scott-lexium/forge/compare/v1.0.0...v1.1.0) (2026-03-10)
 
-- **Phase 15**: Zsh + Oh-My-Zsh shell customization.
-- **Phase 14**: Automated Swap file creation.
-- **SSH Hardening**: Added support for `ssh.socket` masking on modern Ubuntu.
-- **Reset Command**: Robust system restoration and user removal.
-- **Status Command**: Detailed reporting for SSH, UFW, Swap, VPN, and Heal system.
+
+### Features
+
+* initial release of forge v1.0.0 ([b75f4dc](https://github.com/scott-lexium/forge/commit/b75f4dc638bc1842ad585f1a30caf5d6fe111e11))
 
 ## [1.0.0] - 2026-03-10
 
@@ -35,3 +32,5 @@ All notable changes to this project will be documented in this file.
 - System Monitoring Tools
 - Security Auditing with Lynis
 - Server Status Reporting
+- **New: Phase 14 - Automated Swap File Creation**
+- **New: Reset Command to Restore Original Configuration**
