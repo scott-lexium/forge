@@ -9,7 +9,7 @@ set -euo pipefail
 IFS=$'\n\t'
 
 # ─── Meta ─────────────────────────────────────────────────────────────────────
-VERSION="1.3.0"  # x-release-please-version
+VERSION="1.4.0"  # x-release-please-version
 CHANNEL="canary"
 TOOL_NAME="forge"
 INSTALL_PATH="/usr/local/bin/${TOOL_NAME}"
